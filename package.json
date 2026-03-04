@@ -7,7 +7,8 @@
     "build": "esbuild src/main.ts --bundle --external:obsidian --format=cjs --outfile=main.js",
     "test": "vitest run",
     "test:watch": "vitest",
-    "check": "npm test && npm run build"
+    "check": "npm test && npm run build",
+    "release:bundle": "mkdir -p dist && npm run build && cp manifest.json main.js styles.css versions.json dist/"
   },
   "keywords": [],
   "author": "",

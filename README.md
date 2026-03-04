@@ -71,3 +71,13 @@ Current implementation is functional but intentionally conservative:
 
 - `tests/vault-index.test.ts` validates recent-note filtering and retrieval against an in-memory vault adapter.
 - This keeps core retrieval logic testable outside Obsidian runtime.
+
+## Release packaging
+
+Build release artifacts:
+
+```bash
+npm run release:bundle
+```
+
+This writes `manifest.json`, `main.js`, `styles.css`, and `versions.json` to `dist/`.
