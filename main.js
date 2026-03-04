@@ -74,6 +74,16 @@ function extractTodos(markdown) {
   const lines = markdown.split(/\r?\n/);
   return lines.filter((l) => /^\s*[-*]\s+\[\s\]\s+/i.test(l) || /^\s*TODO[:\s]/i.test(l)).map((l) => l.trim());
 }
+function detectDuplicateTitleClusters(notes) {
+  const groups = /* @__PURE__ */ new Map();
+  for (const n of notes) {
+    const base = n.path.split("/").at(-1)?.replace(/\.md$/i, "").toLowerCase() ?? n.path;
+    const arr = groups.get(base) ?? [];
+    arr.push(n.path);
+    groups.set(base, arr);
+  }
+  return [...groups.values()].filter((arr) => arr.length > 1).map((arr) => ({ anchor: arr[0], duplicates: arr.slice(1) }));
+}
 function buildRefinementPrompt(notes, options) {
   const header = [
     "You are an Obsidian note refinement assistant.",
@@ -90,6 +100,48 @@ ${n.content}`).join("\n\n");
   return `${header}
 
 ${body}`;
+}
+
+// src/planner.ts
+function buildRefinementPlan(notes) {
+  const todos = notes.flatMap((n) => extractTodos(n.content));
+  const duplicateClusters = detectDuplicateTitleClusters(notes);
+  const suggestions = [];
+  if (duplicateClusters.length) {
+    suggestions.push(`Merge or cross-link ${duplicateClusters.length} duplicate title cluster(s).`);
+  }
+  if (todos.length > 0) {
+    suggestions.push(`Create a consolidated task dashboard for ${todos.length} TODO item(s).`);
+  }
+  const sparseNotes = notes.filter((n) => n.content.trim().split(/\s+/).length < 40);
+  if (sparseNotes.length) {
+    suggestions.push(`Expand ${sparseNotes.length} short note(s) with context/examples.`);
+  }
+  if (!suggestions.length) {
+    suggestions.push("No obvious structural issues found; focus on style and clarity improvements.");
+  }
+  return {
+    generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    noteCount: notes.length,
+    todoCount: todos.length,
+    duplicateClusters,
+    suggestions
+  };
+}
+function toMarkdownPlan(plan) {
+  const dupes = plan.duplicateClusters.length ? plan.duplicateClusters.map((d) => `- Anchor: ${d.anchor} | Duplicates: ${d.duplicates.join(", ")}`).join("\n") : "- None";
+  return [
+    "## Refinement Plan",
+    `- Generated: ${plan.generatedAt}`,
+    `- Notes scanned: ${plan.noteCount}`,
+    `- TODOs found: ${plan.todoCount}`,
+    "",
+    "### Duplicate clusters",
+    dupes,
+    "",
+    "### Suggestions",
+    ...plan.suggestions.map((s) => `- ${s}`)
+  ].join("\n");
 }
 
 // src/search.ts
@@ -201,32 +253,49 @@ var AICopilotPlugin = class extends import_obsidian2.Plugin {
       name: "AI Copilot: Chat about active note",
       callback: async () => {
         const file = this.app.workspace.getActiveFile();
-        if (!file) {
-          new import_obsidian2.Notice("No active note selected.");
-          return;
-        }
+        if (!file) return void new import_obsidian2.Notice("No active note selected.");
         const content = await this.app.vault.read(file);
-        const query = `Summarize this note and suggest next actions: ${file.path}`;
-        const related = await this.getRelevantNotes(query, this.settings.chatMaxResults);
+        const related = await this.getRelevantNotes(file.basename, this.settings.chatMaxResults);
         const prompt = [
           `ACTIVE NOTE (${file.path}):`,
           content,
           "\nRELATED CONTEXT:",
           ...related.map((n) => `- ${n.path} (score ${n.score.toFixed(2)})
 ${n.content.slice(0, 500)}`),
-          "\nTask: Answer user about this note, suggest improvements, and list TODOs."
+          "\nTask: summarize note, suggest improvements, and list TODOs."
         ].join("\n\n");
-        const client = buildClient(this.settings);
-        const output = await client.chat(prompt, "You are an Obsidian assistant.");
-        new import_obsidian2.Notice(output.slice(0, 2e3) || "No response.");
+        const output = await buildClient(this.settings).chat(prompt, "You are an Obsidian assistant.");
+        await this.writeAssistantOutput("Chat Output", output);
+        new import_obsidian2.Notice("AI Copilot: chat output saved to AI Copilot/Chat Output.md");
+      }
+    });
+    this.addCommand({
+      id: "ai-copilot-chat-query",
+      name: "AI Copilot: Chat using vault query",
+      callback: async () => {
+        const query = window.prompt("Ask a question about your notes:");
+        if (!query?.trim()) return;
+        const related = await this.getRelevantNotes(query, this.settings.chatMaxResults);
+        const context = related.map((n) => `### ${n.path}
+${n.content.slice(0, 1200)}`).join("\n\n");
+        const prompt = `Question: ${query}
+
+Use these notes:
+
+${context}`;
+        const output = await buildClient(this.settings).chat(prompt, "Answer using only note evidence.");
+        await this.writeAssistantOutput("Chat Output", `## Query
+${query}
+
+## Response
+${output}`);
+        new import_obsidian2.Notice("AI Copilot: query response saved.");
       }
     });
     this.addCommand({
       id: "ai-copilot-run-refinement-now",
       name: "AI Copilot: Run refinement now",
-      callback: async () => {
-        await this.runRefinementPass();
-      }
+      callback: async () => void this.runRefinementPass()
     });
     this.startRefinementLoop();
     new import_obsidian2.Notice("AI Copilot loaded.");
@@ -244,54 +313,54 @@ ${n.content.slice(0, 500)}`),
   startRefinementLoop() {
     if (this.intervalId) window.clearInterval(this.intervalId);
     const intervalMs = Math.max(15, this.settings.refinementIntervalMinutes) * 6e4;
-    this.intervalId = window.setInterval(() => {
-      void this.runRefinementPass();
-    }, intervalMs);
+    this.intervalId = window.setInterval(() => void this.runRefinementPass(), intervalMs);
     this.registerInterval(this.intervalId);
   }
   async runRefinementPass() {
     const candidates = await this.getRecentNotes(this.settings.refinementLookbackDays);
-    if (!candidates.length) {
-      new import_obsidian2.Notice("AI Copilot: no recent notes to refine.");
-      return;
-    }
+    if (!candidates.length) return void new import_obsidian2.Notice("AI Copilot: no recent notes to refine.");
+    const plan = buildRefinementPlan(candidates);
     const prompt = buildRefinementPrompt(candidates, {
       enableWebEnrichment: this.settings.enableWebEnrichment
     });
-    const client = buildClient(this.settings);
-    const output = await client.chat(prompt, "You refine markdown notes and preserve intent.");
+    const output = await buildClient(this.settings).chat(
+      `${toMarkdownPlan(plan)}
+
+${prompt}`,
+      "You refine markdown notes and preserve intent."
+    );
     const todos = candidates.flatMap((n) => extractTodos(n.content));
-    const summary = [
-      `Refinement scanned ${candidates.length} notes`,
-      todos.length ? `Found ${todos.length} TODO items` : "No TODO items found"
-    ].join(" \xB7 ");
-    new import_obsidian2.Notice(`AI Copilot: ${summary}`);
-    if (this.settings.refinementAutoApply) {
-      const stamp = `
+    new import_obsidian2.Notice(`AI Copilot: scanned ${candidates.length} notes \xB7 TODOs ${todos.length}`);
+    await this.writeAssistantOutput("Refinement Log", `${toMarkdownPlan(plan)}
+
+## LLM Output
+${output}`);
+  }
+  async writeAssistantOutput(name, body) {
+    const file = await this.ensurePluginFile(`${name}.md`, `# ${name}
+`);
+    const stamp = `
 
 ---
-_AI Copilot refinement run:_ ${(/* @__PURE__ */ new Date()).toISOString()}
+${(/* @__PURE__ */ new Date()).toISOString()}
 `;
-      const target = await this.ensureRefinementLog();
-      await this.app.vault.append(target, `
-## Refinement Output
-
-${output}${stamp}`);
-    }
+    await this.app.vault.append(file, `${stamp}${body}
+`);
   }
-  async ensureRefinementLog() {
-    const path = "AI Copilot/Refinement Log.md";
+  async ensurePluginFile(name, initial) {
+    const folderPath = "AI Copilot";
+    const path = `${folderPath}/${name}`;
     const existing = this.app.vault.getAbstractFileByPath(path);
     if (existing instanceof import_obsidian2.TFile) return existing;
-    const folder = this.app.vault.getAbstractFileByPath("AI Copilot");
-    if (!folder) await this.app.vault.createFolder("AI Copilot");
-    return this.app.vault.create(path, "# AI Copilot Refinement Log\n");
+    if (!this.app.vault.getAbstractFileByPath(folderPath)) {
+      await this.app.vault.createFolder(folderPath);
+    }
+    return this.app.vault.create(path, initial);
   }
   async getRecentNotes(lookbackDays) {
     const cutoff = Date.now() - lookbackDays * 24 * 60 * 60 * 1e3;
     const files = this.app.vault.getMarkdownFiles().filter((f) => f.stat.mtime >= cutoff);
-    const contents = await Promise.all(files.map(async (f) => ({ path: f.path, content: await this.app.vault.read(f) })));
-    return contents;
+    return Promise.all(files.map(async (f) => ({ path: f.path, content: await this.app.vault.read(f) })));
   }
   async getRelevantNotes(query, maxResults) {
     const files = this.app.vault.getMarkdownFiles();
