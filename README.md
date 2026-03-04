@@ -1,20 +1,39 @@
 # Obsidian AI Copilot
 
-Early scaffold for an Obsidian plugin that provides:
+Obsidian plugin scaffold for an AI assistant focused on:
 
-- LLM chat over vault notes
-- Scheduled note refinement (dedupe, TODO extraction, context enrichment)
+- Chat over your vault notes
+- Scheduled note refinement
+- TODO extraction and duplicate-note detection
 
-## Current status
+## Implemented
 
-This repo is bootstrapped with:
+- Plugin entry + commands:
+  - **AI Copilot: Chat about active note**
+  - **AI Copilot: Chat using vault query**
+  - **AI Copilot: Run refinement now**
+- Settings tab:
+  - Provider selection (`none` dry-run or `openai`)
+  - OpenAI API key + model
+  - Chat note result limit
+  - Refinement interval + lookback window
+  - Web-enrichment toggle
+- Retrieval/ranking engine for relevant notes (`src/search.ts`)
+- Refinement planner:
+  - TODO extraction
+  - Duplicate-title clusters
+  - Action suggestions
+- Structured output logs written into vault:
+  - `AI Copilot/Chat Output.md`
+  - `AI Copilot/Refinement Log.md`
+- Sensitive data redaction before writing assistant output (`src/safety.ts`)
 
-- `manifest.json` plugin metadata
-- `src/main.ts` plugin entry
-- `src/refinement.ts` pure prompt builder logic
-- `vitest` unit test setup
+## Quality
 
-## Dev
+- Unit tests (Vitest): ranking, refinement prompt, planner, safety redaction
+- CI workflow runs `npm test` + `npm run build` on pushes/PRs
+
+## Local development
 
 ```bash
 npm install
@@ -22,10 +41,16 @@ npm test
 npm run build
 ```
 
-## Next milestones
+## Next feature ideas
 
-1. Add settings tab for provider/model/API key storage.
-2. Implement vault indexing + retrieval for chat.
-3. Add scheduled refinement runner and dry-run previews.
-4. Add internet-research tool toggle per refinement job.
-5. Add end-to-end plugin tests against mocked vault APIs.
+1. Inline diff preview + one-click apply for refinement edits.
+2. Embeddings-based semantic search (instead of keyword-only ranking).
+3. Provider abstraction for Anthropic/OpenRouter/local models.
+4. Background job status panel (last run, errors, note counts).
+5. Optional internet-enrichment connector with explicit allowlists.
+
+## Notes
+
+Current implementation is functional but intentionally conservative:
+- Refinement writes suggestions to logs by default (safe-by-default).
+- `openai` provider requires user-configured API key in plugin settings.
