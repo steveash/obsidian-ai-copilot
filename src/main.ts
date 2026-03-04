@@ -1,5 +1,7 @@
-import { Notice, Plugin, TFile } from "obsidian";
+import { Notice, Plugin, TFile, WorkspaceLeaf } from "obsidian";
 import { buildClient } from "./llm";
+import { AICopilotChatView, AI_COPILOT_VIEW, upsertChatOutput } from "./chat";
+import { applyPatch } from "./patcher";
 import { buildRefinementPlan, toMarkdownPlan } from "./planner";
 import { buildRefinementPrompt, extractTodos } from "./refinement";
 import { rankNotesByQuery } from "./search";
@@ -13,6 +15,17 @@ export default class AICopilotPlugin extends Plugin {
   async onload() {
     await this.loadSettings();
     this.addSettingTab(new AICopilotSettingTab(this.app, this));
+
+
+    this.registerView(AI_COPILOT_VIEW, (leaf) => new AICopilotChatView(leaf, this.app));
+
+    this.addCommand({
+      id: "ai-copilot-open-chat-panel",
+      name: "AI Copilot: Open chat panel",
+      callback: async () => {
+        await this.activateChatView();
+      }
+    });
 
     this.addCommand({
       id: "ai-copilot-chat-active-note",
@@ -49,7 +62,7 @@ export default class AICopilotPlugin extends Plugin {
 
         const prompt = `Question: ${query}\n\nUse these notes:\n\n${context}`;
         const output = await buildClient(this.settings).chat(prompt, "Answer using only note evidence.");
-        await this.writeAssistantOutput("Chat Output", `## Query\n${query}\n\n## Response\n${output}`);
+        await upsertChatOutput(this.app, `## Query\n${query}\n\n## Response\n${output}`);
         new Notice("AI Copilot: query response saved.");
       }
     });
@@ -84,6 +97,32 @@ export default class AICopilotPlugin extends Plugin {
     this.registerInterval(this.intervalId);
   }
 
+  private async activateChatView() {
+    const { workspace } = this.app;
+    let leaf: WorkspaceLeaf | null = null;
+    const leaves = workspace.getLeavesOfType(AI_COPILOT_VIEW);
+    if (leaves.length) {
+      leaf = leaves[0];
+    } else {
+      leaf = workspace.getRightLeaf(false);
+      if (!leaf) return;
+      await leaf.setViewState({ type: AI_COPILOT_VIEW, active: true });
+    }
+
+    workspace.revealLeaf(leaf);
+    const view = leaf.view;
+    if (view instanceof AICopilotChatView) {
+      view.setSubmitHandler(async (query: string) => {
+        const related = await this.getRelevantNotes(query, this.settings.chatMaxResults);
+        const context = related.map((n) => `### ${n.path}\n${n.content.slice(0, 1200)}`).join("\n\n");
+        const prompt = `Question: ${query}\n\nUse these notes:\n\n${context}`;
+        const output = await buildClient(this.settings).chat(prompt, "Answer using only note evidence.");
+        await upsertChatOutput(this.app, `## Query\n${query}\n\n## Response\n${output}`);
+        return output;
+      });
+    }
+  }
+
   private async runRefinementPass() {
     const candidates = await this.getRecentNotes(this.settings.refinementLookbackDays);
     if (!candidates.length) return void new Notice("AI Copilot: no recent notes to refine.");
@@ -98,6 +137,21 @@ export default class AICopilotPlugin extends Plugin {
     );
 
     const todos = candidates.flatMap((n) => extractTodos(n.content));
+    // deterministic safe patch attempt: normalize double-spaces in first candidate
+    if (this.settings.refinementAutoApply && candidates[0]) {
+      const c = candidates[0];
+      const patched = applyPatch(c.content, {
+        path: c.path,
+        find: "  ",
+        replace: " ",
+        reason: "normalize spacing"
+      });
+      if (patched.applied) {
+        const file = this.app.vault.getAbstractFileByPath(c.path);
+        if (file instanceof TFile) await this.app.vault.modify(file, patched.updatedContent);
+      }
+    }
+
     new Notice(`AI Copilot: scanned ${candidates.length} notes · TODOs ${todos.length}`);
 
     await this.writeAssistantOutput("Refinement Log", `${toMarkdownPlan(plan)}\n\n## LLM Output\n${output}`);

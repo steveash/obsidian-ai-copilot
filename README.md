@@ -54,3 +54,15 @@ npm run build
 Current implementation is functional but intentionally conservative:
 - Refinement writes suggestions to logs by default (safe-by-default).
 - `openai` provider requires user-configured API key in plugin settings.
+
+
+## Implemented features (current)
+
+- Settings tab for provider/model/refinement schedule
+- Query-based note chat with ranked context
+- Dedicated AI Copilot chat panel view
+- Scheduled refinement run with plan + output logs
+- Safe deterministic auto-apply hook (spacing normalization)
+- Sensitive data redaction before writing logs
+- CI workflow (test + build)
+

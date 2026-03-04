@@ -23,7 +23,7 @@ __export(main_exports, {
   default: () => AICopilotPlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian2 = require("obsidian");
+var import_obsidian3 = require("obsidian");
 
 // src/llm.ts
 var DryRunClient = class {
@@ -67,6 +67,93 @@ var OpenAIClient = class {
 function buildClient(settings) {
   if (settings.provider === "openai") return new OpenAIClient(settings);
   return new DryRunClient();
+}
+
+// src/chat.ts
+var import_obsidian = require("obsidian");
+var AI_COPILOT_VIEW = "ai-copilot-chat-view";
+var AICopilotChatView = class extends import_obsidian.ItemView {
+  constructor(leaf, appRef) {
+    super(leaf);
+    this.appRef = appRef;
+    this.messages = [];
+    this.onSubmit = null;
+    void appRef;
+  }
+  getViewType() {
+    return AI_COPILOT_VIEW;
+  }
+  getDisplayText() {
+    return "AI Copilot Chat";
+  }
+  setSubmitHandler(handler) {
+    this.onSubmit = handler;
+  }
+  async onOpen() {
+    this.render();
+  }
+  render() {
+    const root = this.containerEl.children[1];
+    root.empty();
+    root.createEl("h3", { text: "AI Copilot Chat" });
+    const list = root.createDiv({ cls: "ai-copilot-chat-list" });
+    for (const msg of this.messages) {
+      const item = list.createDiv({ cls: `ai-copilot-msg ai-copilot-${msg.role}` });
+      item.createEl("strong", { text: `${msg.role}: ` });
+      item.appendText(msg.text);
+    }
+    const form = root.createEl("form");
+    const input = form.createEl("input", { type: "text", placeholder: "Ask about your notes..." });
+    input.style.width = "80%";
+    const btn = form.createEl("button", { text: "Send" });
+    btn.type = "submit";
+    form.onsubmit = async (e) => {
+      e.preventDefault();
+      const q = input.value.trim();
+      if (!q || !this.onSubmit) return;
+      this.messages.push({ role: "user", text: q });
+      input.value = "";
+      this.render();
+      const reply = await this.onSubmit(q);
+      this.messages.push({ role: "assistant", text: reply });
+      this.render();
+    };
+  }
+};
+async function upsertChatOutput(app, text) {
+  const path = "AI Copilot/Chat Output.md";
+  const existing = app.vault.getAbstractFileByPath(path);
+  let file;
+  if (existing && "path" in existing) {
+    file = existing;
+  } else {
+    if (!app.vault.getAbstractFileByPath("AI Copilot")) {
+      await app.vault.createFolder("AI Copilot");
+    }
+    file = await app.vault.create(path, "# Chat Output\n");
+  }
+  await app.vault.append(file, `
+
+---
+${(/* @__PURE__ */ new Date()).toISOString()}
+${text}
+`);
+  return file;
+}
+
+// src/patcher.ts
+function applyPatch(content, patch) {
+  if (!patch.find) {
+    return { path: patch.path, applied: false, reason: "empty find", updatedContent: content };
+  }
+  if (!content.includes(patch.find)) {
+    return { path: patch.path, applied: false, reason: "find text not found", updatedContent: content };
+  }
+  return {
+    path: patch.path,
+    applied: true,
+    updatedContent: content.replace(patch.find, patch.replace)
+  };
 }
 
 // src/refinement.ts
@@ -177,7 +264,7 @@ function redactSensitive(input) {
 }
 
 // src/settings.ts
-var import_obsidian = require("obsidian");
+var import_obsidian2 = require("obsidian");
 var DEFAULT_SETTINGS = {
   provider: "none",
   openaiApiKey: "",
@@ -188,7 +275,7 @@ var DEFAULT_SETTINGS = {
   refinementAutoApply: false,
   enableWebEnrichment: false
 };
-var AICopilotSettingTab = class extends import_obsidian.PluginSettingTab {
+var AICopilotSettingTab = class extends import_obsidian2.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
@@ -197,31 +284,31 @@ var AICopilotSettingTab = class extends import_obsidian.PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
     containerEl.createEl("h2", { text: "AI Copilot Settings" });
-    new import_obsidian.Setting(containerEl).setName("Provider").setDesc("LLM provider used by chat + refinement").addDropdown(
+    new import_obsidian2.Setting(containerEl).setName("Provider").setDesc("LLM provider used by chat + refinement").addDropdown(
       (d) => d.addOption("none", "None (dry-run)").addOption("openai", "OpenAI").setValue(this.plugin.settings.provider).onChange(async (value) => {
         this.plugin.settings.provider = value;
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian.Setting(containerEl).setName("OpenAI API key").setDesc("Stored locally in Obsidian plugin data.").addText(
+    new import_obsidian2.Setting(containerEl).setName("OpenAI API key").setDesc("Stored locally in Obsidian plugin data.").addText(
       (t) => t.setPlaceholder("sk-...").setValue(this.plugin.settings.openaiApiKey).onChange(async (value) => {
         this.plugin.settings.openaiApiKey = value.trim();
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian.Setting(containerEl).setName("OpenAI model").setDesc("Model used for note chat and refinement").addText(
+    new import_obsidian2.Setting(containerEl).setName("OpenAI model").setDesc("Model used for note chat and refinement").addText(
       (t) => t.setValue(this.plugin.settings.openaiModel).onChange(async (value) => {
         this.plugin.settings.openaiModel = value.trim() || "gpt-4o-mini";
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian.Setting(containerEl).setName("Chat max note results").setDesc("How many notes are included in chat context").addSlider(
+    new import_obsidian2.Setting(containerEl).setName("Chat max note results").setDesc("How many notes are included in chat context").addSlider(
       (s) => s.setLimits(1, 20, 1).setValue(this.plugin.settings.chatMaxResults).setDynamicTooltip().onChange(async (value) => {
         this.plugin.settings.chatMaxResults = value;
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian.Setting(containerEl).setName("Refinement interval (minutes)").setDesc("Background pass cadence").addText(
+    new import_obsidian2.Setting(containerEl).setName("Refinement interval (minutes)").setDesc("Background pass cadence").addText(
       (t) => t.setValue(String(this.plugin.settings.refinementIntervalMinutes)).onChange(async (value) => {
         const n = Number(value);
         if (Number.isFinite(n) && n >= 15) {
@@ -230,19 +317,19 @@ var AICopilotSettingTab = class extends import_obsidian.PluginSettingTab {
         }
       })
     );
-    new import_obsidian.Setting(containerEl).setName("Refinement lookback (days)").setDesc("Only notes modified within this range are candidates").addSlider(
+    new import_obsidian2.Setting(containerEl).setName("Refinement lookback (days)").setDesc("Only notes modified within this range are candidates").addSlider(
       (s) => s.setLimits(1, 30, 1).setValue(this.plugin.settings.refinementLookbackDays).setDynamicTooltip().onChange(async (value) => {
         this.plugin.settings.refinementLookbackDays = value;
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian.Setting(containerEl).setName("Auto apply refinement").setDesc("If disabled, plugin only logs/surfaces suggestions").addToggle(
+    new import_obsidian2.Setting(containerEl).setName("Auto apply refinement").setDesc("If disabled, plugin only logs/surfaces suggestions").addToggle(
       (tg) => tg.setValue(this.plugin.settings.refinementAutoApply).onChange(async (value) => {
         this.plugin.settings.refinementAutoApply = value;
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian.Setting(containerEl).setName("Enable web enrichment").setDesc("Allow refinement prompts to request internet context").addToggle(
+    new import_obsidian2.Setting(containerEl).setName("Enable web enrichment").setDesc("Allow refinement prompts to request internet context").addToggle(
       (tg) => tg.setValue(this.plugin.settings.enableWebEnrichment).onChange(async (value) => {
         this.plugin.settings.enableWebEnrichment = value;
         await this.plugin.saveSettings();
@@ -252,7 +339,7 @@ var AICopilotSettingTab = class extends import_obsidian.PluginSettingTab {
 };
 
 // src/main.ts
-var AICopilotPlugin = class extends import_obsidian2.Plugin {
+var AICopilotPlugin = class extends import_obsidian3.Plugin {
   constructor() {
     super(...arguments);
     this.settings = DEFAULT_SETTINGS;
@@ -261,12 +348,20 @@ var AICopilotPlugin = class extends import_obsidian2.Plugin {
   async onload() {
     await this.loadSettings();
     this.addSettingTab(new AICopilotSettingTab(this.app, this));
+    this.registerView(AI_COPILOT_VIEW, (leaf) => new AICopilotChatView(leaf, this.app));
+    this.addCommand({
+      id: "ai-copilot-open-chat-panel",
+      name: "AI Copilot: Open chat panel",
+      callback: async () => {
+        await this.activateChatView();
+      }
+    });
     this.addCommand({
       id: "ai-copilot-chat-active-note",
       name: "AI Copilot: Chat about active note",
       callback: async () => {
         const file = this.app.workspace.getActiveFile();
-        if (!file) return void new import_obsidian2.Notice("No active note selected.");
+        if (!file) return void new import_obsidian3.Notice("No active note selected.");
         const content = await this.app.vault.read(file);
         const related = await this.getRelevantNotes(file.basename, this.settings.chatMaxResults);
         const prompt = [
@@ -279,7 +374,7 @@ ${n.content.slice(0, 500)}`),
         ].join("\n\n");
         const output = await buildClient(this.settings).chat(prompt, "You are an Obsidian assistant.");
         await this.writeAssistantOutput("Chat Output", output);
-        new import_obsidian2.Notice("AI Copilot: chat output saved to AI Copilot/Chat Output.md");
+        new import_obsidian3.Notice("AI Copilot: chat output saved to AI Copilot/Chat Output.md");
       }
     });
     this.addCommand({
@@ -297,12 +392,12 @@ Use these notes:
 
 ${context}`;
         const output = await buildClient(this.settings).chat(prompt, "Answer using only note evidence.");
-        await this.writeAssistantOutput("Chat Output", `## Query
+        await upsertChatOutput(this.app, `## Query
 ${query}
 
 ## Response
 ${output}`);
-        new import_obsidian2.Notice("AI Copilot: query response saved.");
+        new import_obsidian3.Notice("AI Copilot: query response saved.");
       }
     });
     this.addCommand({
@@ -311,7 +406,7 @@ ${output}`);
       callback: async () => void this.runRefinementPass()
     });
     this.startRefinementLoop();
-    new import_obsidian2.Notice("AI Copilot loaded.");
+    new import_obsidian3.Notice("AI Copilot loaded.");
   }
   onunload() {
     if (this.intervalId) window.clearInterval(this.intervalId);
@@ -329,9 +424,42 @@ ${output}`);
     this.intervalId = window.setInterval(() => void this.runRefinementPass(), intervalMs);
     this.registerInterval(this.intervalId);
   }
+  async activateChatView() {
+    const { workspace } = this.app;
+    let leaf = null;
+    const leaves = workspace.getLeavesOfType(AI_COPILOT_VIEW);
+    if (leaves.length) {
+      leaf = leaves[0];
+    } else {
+      leaf = workspace.getRightLeaf(false);
+      if (!leaf) return;
+      await leaf.setViewState({ type: AI_COPILOT_VIEW, active: true });
+    }
+    workspace.revealLeaf(leaf);
+    const view = leaf.view;
+    if (view instanceof AICopilotChatView) {
+      view.setSubmitHandler(async (query) => {
+        const related = await this.getRelevantNotes(query, this.settings.chatMaxResults);
+        const context = related.map((n) => `### ${n.path}
+${n.content.slice(0, 1200)}`).join("\n\n");
+        const prompt = `Question: ${query}
+
+Use these notes:
+
+${context}`;
+        const output = await buildClient(this.settings).chat(prompt, "Answer using only note evidence.");
+        await upsertChatOutput(this.app, `## Query
+${query}
+
+## Response
+${output}`);
+        return output;
+      });
+    }
+  }
   async runRefinementPass() {
     const candidates = await this.getRecentNotes(this.settings.refinementLookbackDays);
-    if (!candidates.length) return void new import_obsidian2.Notice("AI Copilot: no recent notes to refine.");
+    if (!candidates.length) return void new import_obsidian3.Notice("AI Copilot: no recent notes to refine.");
     const plan = buildRefinementPlan(candidates);
     const prompt = buildRefinementPrompt(candidates, {
       enableWebEnrichment: this.settings.enableWebEnrichment
@@ -343,7 +471,20 @@ ${prompt}`,
       "You refine markdown notes and preserve intent."
     );
     const todos = candidates.flatMap((n) => extractTodos(n.content));
-    new import_obsidian2.Notice(`AI Copilot: scanned ${candidates.length} notes \xB7 TODOs ${todos.length}`);
+    if (this.settings.refinementAutoApply && candidates[0]) {
+      const c = candidates[0];
+      const patched = applyPatch(c.content, {
+        path: c.path,
+        find: "  ",
+        replace: " ",
+        reason: "normalize spacing"
+      });
+      if (patched.applied) {
+        const file = this.app.vault.getAbstractFileByPath(c.path);
+        if (file instanceof import_obsidian3.TFile) await this.app.vault.modify(file, patched.updatedContent);
+      }
+    }
+    new import_obsidian3.Notice(`AI Copilot: scanned ${candidates.length} notes \xB7 TODOs ${todos.length}`);
     await this.writeAssistantOutput("Refinement Log", `${toMarkdownPlan(plan)}
 
 ## LLM Output
@@ -364,7 +505,7 @@ ${(/* @__PURE__ */ new Date()).toISOString()}
     const folderPath = "AI Copilot";
     const path = `${folderPath}/${name}`;
     const existing = this.app.vault.getAbstractFileByPath(path);
-    if (existing instanceof import_obsidian2.TFile) return existing;
+    if (existing instanceof import_obsidian3.TFile) return existing;
     if (!this.app.vault.getAbstractFileByPath(folderPath)) {
       await this.app.vault.createFolder(folderPath);
     }
