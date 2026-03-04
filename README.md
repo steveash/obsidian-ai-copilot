@@ -66,3 +66,8 @@ Current implementation is functional but intentionally conservative:
 - Sensitive data redaction before writing logs
 - CI workflow (test + build)
 
+
+## Integration-style test coverage
+
+- `tests/vault-index.test.ts` validates recent-note filtering and retrieval against an in-memory vault adapter.
+- This keeps core retrieval logic testable outside Obsidian runtime.
