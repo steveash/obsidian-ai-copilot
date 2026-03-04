@@ -163,6 +163,19 @@ ${note.content}`.toLowerCase();
   }).filter((n) => n.score > 0).sort((a, b) => b.score - a.score).slice(0, maxResults);
 }
 
+// src/safety.ts
+var API_KEY_PATTERNS = [
+  /sk-[A-Za-z0-9]{20,}/g,
+  /api[_-]?key\s*[:=]\s*["']?[A-Za-z0-9_\-]{16,}["']?/gi
+];
+function redactSensitive(input) {
+  let output = input;
+  for (const pattern of API_KEY_PATTERNS) {
+    output = output.replace(pattern, "[REDACTED]");
+  }
+  return output;
+}
+
 // src/settings.ts
 var import_obsidian = require("obsidian");
 var DEFAULT_SETTINGS = {
@@ -344,7 +357,7 @@ ${output}`);
 ---
 ${(/* @__PURE__ */ new Date()).toISOString()}
 `;
-    await this.app.vault.append(file, `${stamp}${body}
+    await this.app.vault.append(file, `${stamp}${redactSensitive(body)}
 `);
   }
   async ensurePluginFile(name, initial) {

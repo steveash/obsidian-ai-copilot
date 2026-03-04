@@ -6,7 +6,8 @@
   "scripts": {
     "build": "esbuild src/main.ts --bundle --external:obsidian --format=cjs --outfile=main.js",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "check": "npm test && npm run build"
   },
   "keywords": [],
   "author": "",

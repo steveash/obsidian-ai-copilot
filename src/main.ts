@@ -3,6 +3,7 @@ import { buildClient } from "./llm";
 import { buildRefinementPlan, toMarkdownPlan } from "./planner";
 import { buildRefinementPrompt, extractTodos } from "./refinement";
 import { rankNotesByQuery } from "./search";
+import { redactSensitive } from "./safety";
 import { AICopilotSettingTab, DEFAULT_SETTINGS, type AICopilotSettings } from "./settings";
 
 export default class AICopilotPlugin extends Plugin {
@@ -105,7 +106,7 @@ export default class AICopilotPlugin extends Plugin {
   private async writeAssistantOutput(name: string, body: string) {
     const file = await this.ensurePluginFile(`${name}.md`, `# ${name}\n`);
     const stamp = `\n\n---\n${new Date().toISOString()}\n`;
-    await this.app.vault.append(file, `${stamp}${body}\n`);
+    await this.app.vault.append(file, `${stamp}${redactSensitive(body)}\n`);
   }
 
   private async ensurePluginFile(name: string, initial: string): Promise<TFile> {
