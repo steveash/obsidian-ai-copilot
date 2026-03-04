@@ -1,0 +1,25 @@
+{
+  "name": "obsidian-ai-copilot",
+  "version": "0.0.1",
+  "description": "Obsidian plugin: AI chat over notes + scheduled note refinement",
+  "main": "index.js",
+  "scripts": {
+    "build": "esbuild src/main.ts --bundle --external:obsidian --format=cjs --outfile=main.js",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@types/node": "^25.3.3",
+    "esbuild": "^0.27.3",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.18"
+  },
+  "dependencies": {
+    "obsidian": "^1.12.3"
+  },
+  "private": true,
+  "type": "module"
+}
