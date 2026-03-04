@@ -11,6 +11,10 @@ export interface AICopilotSettings {
   refinementLookbackDays: number;
   refinementAutoApply: boolean;
   enableWebEnrichment: boolean;
+  retrievalLexicalWeight: number;
+  retrievalSemanticWeight: number;
+  retrievalFreshnessWeight: number;
+  retrievalGraphExpandHops: number;
 }
 
 export const DEFAULT_SETTINGS: AICopilotSettings = {
@@ -21,7 +25,11 @@ export const DEFAULT_SETTINGS: AICopilotSettings = {
   refinementIntervalMinutes: 120,
   refinementLookbackDays: 3,
   refinementAutoApply: false,
-  enableWebEnrichment: false
+  enableWebEnrichment: false,
+  retrievalLexicalWeight: 0.45,
+  retrievalSemanticWeight: 0.45,
+  retrievalFreshnessWeight: 0.1,
+  retrievalGraphExpandHops: 1
 };
 
 export class AICopilotSettingTab extends PluginSettingTab {
@@ -135,6 +143,62 @@ export class AICopilotSettingTab extends PluginSettingTab {
           this.plugin.settings.enableWebEnrichment = value;
           await this.plugin.saveSettings();
         })
+      );
+
+    new Setting(containerEl)
+      .setName("Retrieval lexical weight")
+      .setDesc("Weight for BM25-style keyword overlap")
+      .addSlider((s) =>
+        s
+          .setLimits(0, 1, 0.05)
+          .setValue(this.plugin.settings.retrievalLexicalWeight)
+          .setDynamicTooltip()
+          .onChange(async (value) => {
+            this.plugin.settings.retrievalLexicalWeight = Number(value.toFixed(2));
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Retrieval semantic weight")
+      .setDesc("Weight for local embedding cosine similarity")
+      .addSlider((s) =>
+        s
+          .setLimits(0, 1, 0.05)
+          .setValue(this.plugin.settings.retrievalSemanticWeight)
+          .setDynamicTooltip()
+          .onChange(async (value) => {
+            this.plugin.settings.retrievalSemanticWeight = Number(value.toFixed(2));
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Retrieval freshness weight")
+      .setDesc("Bias toward recently edited notes")
+      .addSlider((s) =>
+        s
+          .setLimits(0, 1, 0.05)
+          .setValue(this.plugin.settings.retrievalFreshnessWeight)
+          .setDynamicTooltip()
+          .onChange(async (value) => {
+            this.plugin.settings.retrievalFreshnessWeight = Number(value.toFixed(2));
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Graph expansion hops")
+      .setDesc("Boost notes connected by [[wikilinks]] from top results")
+      .addSlider((s) =>
+        s
+          .setLimits(0, 2, 1)
+          .setValue(this.plugin.settings.retrievalGraphExpandHops)
+          .setDynamicTooltip()
+          .onChange(async (value) => {
+            this.plugin.settings.retrievalGraphExpandHops = value;
+            await this.plugin.saveSettings();
+          })
       );
   }
 }

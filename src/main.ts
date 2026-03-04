@@ -4,7 +4,7 @@ import { AICopilotChatView, AI_COPILOT_VIEW, upsertChatOutput } from "./chat";
 import { applyPatch } from "./patcher";
 import { buildRefinementPlan, toMarkdownPlan } from "./planner";
 import { buildRefinementPrompt, extractTodos } from "./refinement";
-import { rankNotesByQuery } from "./search";
+import { hybridRetrieve } from "./semantic-retrieval";
 import { redactSensitive } from "./safety";
 import { AICopilotSettingTab, DEFAULT_SETTINGS, type AICopilotSettings } from "./settings";
 
@@ -182,7 +182,16 @@ export default class AICopilotPlugin extends Plugin {
 
   private async getRelevantNotes(query: string, maxResults: number) {
     const files = this.app.vault.getMarkdownFiles();
-    const notes = await Promise.all(files.map(async (f) => ({ path: f.path, content: await this.app.vault.read(f) })));
-    return rankNotesByQuery(notes, query, maxResults);
+    const notes = await Promise.all(
+      files.map(async (f) => ({ path: f.path, content: await this.app.vault.read(f), mtime: f.stat.mtime }))
+    );
+
+    return hybridRetrieve(notes, query, {
+      maxResults,
+      lexicalWeight: this.settings.retrievalLexicalWeight,
+      semanticWeight: this.settings.retrievalSemanticWeight,
+      freshnessWeight: this.settings.retrievalFreshnessWeight,
+      graphExpandHops: this.settings.retrievalGraphExpandHops
+    });
   }
 }

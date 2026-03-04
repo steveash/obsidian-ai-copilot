@@ -231,23 +231,91 @@ function toMarkdownPlan(plan) {
   ].join("\n");
 }
 
-// src/search.ts
-function tokenize(input) {
-  return input.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter((x) => x.length > 1);
+// src/semantic-retrieval.ts
+var DEFAULT_DIM = 256;
+function tokenize(text) {
+  return text.toLowerCase().replace(/[^a-z0-9#\[\]\/\-\s]/g, " ").split(/\s+/).filter((t) => t.length > 1);
 }
-function rankNotesByQuery(notes, query, maxResults = 5) {
-  const terms = [...new Set(tokenize(query))];
-  if (!terms.length) return [];
-  return notes.map((note) => {
-    const hay = `${note.path}
-${note.content}`.toLowerCase();
-    const matchedTerms = terms.filter((term) => hay.includes(term));
-    const exactPhraseBonus = hay.includes(query.toLowerCase()) ? 1.5 : 0;
-    const coverage = matchedTerms.length / terms.length;
-    const density = matchedTerms.length / Math.max(1, tokenize(note.content).length);
-    const score = coverage * 3 + density + exactPhraseBonus;
-    return { ...note, score, matchedTerms };
-  }).filter((n) => n.score > 0).sort((a, b) => b.score - a.score).slice(0, maxResults);
+function hashToken(token) {
+  let h = 2166136261;
+  for (let i = 0; i < token.length; i++) {
+    h ^= token.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return Math.abs(h >>> 0);
+}
+function embed(text, dim = DEFAULT_DIM) {
+  const vec = new Array(dim).fill(0);
+  const tokens = tokenize(text);
+  for (const tok of tokens) {
+    const idx = hashToken(tok) % dim;
+    vec[idx] += 1;
+    for (let i = 0; i < Math.max(0, tok.length - 2); i++) {
+      const tri = tok.slice(i, i + 3);
+      vec[hashToken(`tri:${tri}`) % dim] += 0.35;
+    }
+  }
+  const norm = Math.sqrt(vec.reduce((a, b) => a + b * b, 0)) || 1;
+  return vec.map((v) => v / norm);
+}
+function cosine(a, b) {
+  let s = 0;
+  for (let i = 0; i < Math.min(a.length, b.length); i++) s += a[i] * b[i];
+  return s;
+}
+function extractMetadata(content) {
+  const tags = [...content.matchAll(/(^|\s)#([a-zA-Z0-9_\/-]+)/g)].map((m) => m[2].toLowerCase());
+  const links = [...content.matchAll(/\[\[([^\]]+)\]\]/g)].map((m) => m[1].split("|")[0].trim());
+  const headings = [...content.matchAll(/^#{1,6}\s+(.+)$/gm)].map((m) => m[1].trim());
+  return { tags, links, headings };
+}
+function lexicalScore(doc, queryTerms) {
+  const hay = `${doc.path}
+${doc.content}`.toLowerCase();
+  if (!queryTerms.length) return 0;
+  const matches = queryTerms.filter((t) => hay.includes(t));
+  const coverage = matches.length / queryTerms.length;
+  const phrase = hay.includes(queryTerms.join(" ")) ? 0.5 : 0;
+  return coverage + phrase;
+}
+function freshnessScore(mtime) {
+  if (!mtime) return 0;
+  const ageDays = (Date.now() - mtime) / (1e3 * 60 * 60 * 24);
+  return 1 / (1 + Math.max(0, ageDays));
+}
+function hybridRetrieve(notes, query, options) {
+  const qTerms = tokenize(query);
+  const qVec = embed(query);
+  const base = notes.map((doc) => {
+    const metadata = extractMetadata(doc.content);
+    const sem = cosine(embed(`${doc.path}
+${doc.content}`), qVec);
+    const lex = lexicalScore(doc, qTerms);
+    const fresh = freshnessScore(doc.mtime);
+    return {
+      ...doc,
+      metadata,
+      lexicalScore: lex,
+      semanticScore: sem,
+      freshnessScore: fresh,
+      graphBoost: 0,
+      score: options.lexicalWeight * lex + options.semanticWeight * sem + options.freshnessWeight * fresh
+    };
+  });
+  if (options.graphExpandHops > 0) {
+    const pathMap = new Map(base.map((b) => [b.path, b]));
+    const topSeed = [...base].sort((a, b) => b.score - a.score).slice(0, Math.max(3, options.maxResults));
+    for (const seed of topSeed) {
+      for (const link of seed.metadata.links) {
+        const direct = pathMap.get(link) || pathMap.get(`${link}.md`);
+        if (direct) {
+          direct.graphBoost += 0.15;
+          direct.score += 0.15;
+        }
+      }
+    }
+  }
+  return base.sort((a, b) => b.score - a.score).slice(0, options.maxResults);
 }
 
 // src/safety.ts
@@ -273,7 +341,11 @@ var DEFAULT_SETTINGS = {
   refinementIntervalMinutes: 120,
   refinementLookbackDays: 3,
   refinementAutoApply: false,
-  enableWebEnrichment: false
+  enableWebEnrichment: false,
+  retrievalLexicalWeight: 0.45,
+  retrievalSemanticWeight: 0.45,
+  retrievalFreshnessWeight: 0.1,
+  retrievalGraphExpandHops: 1
 };
 var AICopilotSettingTab = class extends import_obsidian2.PluginSettingTab {
   constructor(app, plugin) {
@@ -332,6 +404,30 @@ var AICopilotSettingTab = class extends import_obsidian2.PluginSettingTab {
     new import_obsidian2.Setting(containerEl).setName("Enable web enrichment").setDesc("Allow refinement prompts to request internet context").addToggle(
       (tg) => tg.setValue(this.plugin.settings.enableWebEnrichment).onChange(async (value) => {
         this.plugin.settings.enableWebEnrichment = value;
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian2.Setting(containerEl).setName("Retrieval lexical weight").setDesc("Weight for BM25-style keyword overlap").addSlider(
+      (s) => s.setLimits(0, 1, 0.05).setValue(this.plugin.settings.retrievalLexicalWeight).setDynamicTooltip().onChange(async (value) => {
+        this.plugin.settings.retrievalLexicalWeight = Number(value.toFixed(2));
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian2.Setting(containerEl).setName("Retrieval semantic weight").setDesc("Weight for local embedding cosine similarity").addSlider(
+      (s) => s.setLimits(0, 1, 0.05).setValue(this.plugin.settings.retrievalSemanticWeight).setDynamicTooltip().onChange(async (value) => {
+        this.plugin.settings.retrievalSemanticWeight = Number(value.toFixed(2));
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian2.Setting(containerEl).setName("Retrieval freshness weight").setDesc("Bias toward recently edited notes").addSlider(
+      (s) => s.setLimits(0, 1, 0.05).setValue(this.plugin.settings.retrievalFreshnessWeight).setDynamicTooltip().onChange(async (value) => {
+        this.plugin.settings.retrievalFreshnessWeight = Number(value.toFixed(2));
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian2.Setting(containerEl).setName("Graph expansion hops").setDesc("Boost notes connected by [[wikilinks]] from top results").addSlider(
+      (s) => s.setLimits(0, 2, 1).setValue(this.plugin.settings.retrievalGraphExpandHops).setDynamicTooltip().onChange(async (value) => {
+        this.plugin.settings.retrievalGraphExpandHops = value;
         await this.plugin.saveSettings();
       })
     );
@@ -518,7 +614,15 @@ ${(/* @__PURE__ */ new Date()).toISOString()}
   }
   async getRelevantNotes(query, maxResults) {
     const files = this.app.vault.getMarkdownFiles();
-    const notes = await Promise.all(files.map(async (f) => ({ path: f.path, content: await this.app.vault.read(f) })));
-    return rankNotesByQuery(notes, query, maxResults);
+    const notes = await Promise.all(
+      files.map(async (f) => ({ path: f.path, content: await this.app.vault.read(f), mtime: f.stat.mtime }))
+    );
+    return hybridRetrieve(notes, query, {
+      maxResults,
+      lexicalWeight: this.settings.retrievalLexicalWeight,
+      semanticWeight: this.settings.retrievalSemanticWeight,
+      freshnessWeight: this.settings.retrievalFreshnessWeight,
+      graphExpandHops: this.settings.retrievalGraphExpandHops
+    });
   }
 };

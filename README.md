@@ -81,3 +81,16 @@ npm run release:bundle
 ```
 
 This writes `manifest.json`, `main.js`, `styles.css`, and `versions.json` to `dist/`.
+
+
+## Retrieval design notes (researched + implemented)
+
+Implemented a local **hybrid retrieval** pipeline inspired by common RAG best practices:
+
+- Lexical overlap score (BM25-style sparse signal)
+- Local embedding cosine similarity (dense-ish semantic signal)
+- Freshness boost from note `mtime`
+- Graph enrichment via `[[wikilinks]]` from top-ranked notes
+- Metadata extraction (`tags`, `headings`, `links`) for future filtering/reranking
+
+This gives better robustness for both exact-term and concept-level queries while staying fully local/private.
