@@ -1,49 +1,45 @@
 import { describe, expect, it } from "vitest";
-import { hybridRetrieve } from "../src/semantic-retrieval";
+import { applyGraphBoost, cosine, tokenize } from "../src/semantic-retrieval";
 
-describe("hybridRetrieve", () => {
-  it("combines lexical + semantic + freshness signals", () => {
-    const now = Date.now();
-    const docs = [
-      {
-        path: "AI/Plugin Architecture.md",
-        content: "# Architecture\nObsidian plugin semantic retrieval and embeddings",
-        mtime: now - 1000
-      },
-      {
-        path: "Random/Grocery.md",
-        content: "milk eggs bread",
-        mtime: now - 1000
-      }
-    ];
-
-    const out = hybridRetrieve(docs, "obsidian semantic search", {
-      maxResults: 2,
-      lexicalWeight: 0.45,
-      semanticWeight: 0.45,
-      freshnessWeight: 0.1,
-      graphExpandHops: 1
-    });
-
-    expect(out[0].path).toBe("AI/Plugin Architecture.md");
-    expect(out[0].score).toBeGreaterThan(out[1].score);
+describe("semantic utilities", () => {
+  it("tokenizes queries", () => {
+    expect(tokenize("Obsidian semantic-search!")).toContain("obsidian");
   });
 
-  it("applies graph boost for wikilinked notes", () => {
-    const docs = [
-      { path: "A.md", content: "Query topic [[B]]", mtime: Date.now() },
-      { path: "B.md", content: "Deep details on query topic", mtime: Date.now() }
-    ];
+  it("computes cosine similarity", () => {
+    expect(cosine([1, 0], [1, 0])).toBe(1);
+    expect(cosine([1, 0], [0, 1])).toBe(0);
+  });
 
-    const out = hybridRetrieve(docs, "query topic", {
-      maxResults: 2,
-      lexicalWeight: 0.5,
-      semanticWeight: 0.4,
-      freshnessWeight: 0.1,
-      graphExpandHops: 1
-    });
+  it("applies graph boost from linked notes", () => {
+    const boosted = applyGraphBoost(
+      [
+        {
+          path: "A.md",
+          content: "[[B]]",
+          score: 1,
+          lexicalScore: 1,
+          semanticScore: 0.1,
+          freshnessScore: 0.1,
+          graphBoost: 0,
+          metadata: { tags: [], links: ["B"], headings: [] }
+        },
+        {
+          path: "B.md",
+          content: "target",
+          score: 0.2,
+          lexicalScore: 0.2,
+          semanticScore: 0.1,
+          freshnessScore: 0.1,
+          graphBoost: 0,
+          metadata: { tags: [], links: [], headings: [] }
+        }
+      ],
+      2,
+      1
+    );
 
-    const b = out.find((x) => x.path === "B.md");
+    const b = boosted.find((x) => x.path === "B.md");
     expect((b?.graphBoost ?? 0) > 0).toBe(true);
   });
 });

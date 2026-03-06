@@ -4,17 +4,30 @@ import { AICopilotChatView, AI_COPILOT_VIEW, upsertChatOutput } from "./chat";
 import { applyPatch } from "./patcher";
 import { buildRefinementPlan, toMarkdownPlan } from "./planner";
 import { buildRefinementPrompt, extractTodos } from "./refinement";
-import { hybridRetrieve } from "./semantic-retrieval";
+import {
+  applyGraphBoost,
+  cosine,
+  extractMetadata,
+  freshnessScore,
+  lexicalScore,
+  tokenize,
+  type RetrievedNote
+} from "./semantic-retrieval";
+import { PersistentVectorIndex } from "./vector-index";
+import { OpenAIEmbeddingProvider, FallbackHashEmbeddingProvider } from "./embedding-provider";
+import { VaultVectorStorage } from "./vault-vector-storage";
 import { redactSensitive } from "./safety";
 import { AICopilotSettingTab, DEFAULT_SETTINGS, type AICopilotSettings } from "./settings";
 
 export default class AICopilotPlugin extends Plugin {
   settings: AICopilotSettings = DEFAULT_SETTINGS;
   private intervalId: number | null = null;
+  private vectorIndex: PersistentVectorIndex | null = null;
 
   async onload() {
     await this.loadSettings();
     this.addSettingTab(new AICopilotSettingTab(this.app, this));
+    this.initializeVectorIndex();
 
 
     this.registerView(AI_COPILOT_VIEW, (leaf) => new AICopilotChatView(leaf, this.app));
@@ -68,6 +81,21 @@ export default class AICopilotPlugin extends Plugin {
     });
 
     this.addCommand({
+      id: "ai-copilot-rebuild-vector-index",
+      name: "AI Copilot: Rebuild persistent vector index",
+      callback: async () => {
+        const notes = await this.getAllNotes();
+        if (!this.vectorIndex) this.initializeVectorIndex();
+        const count = await this.vectorIndex!.rebuild(
+          notes.map((n) => ({ path: n.path, content: `${n.path}
+${n.content}` })),
+          this.settings.embeddingModel
+        );
+        new Notice(`AI Copilot: rebuilt vector index for ${count} notes.`);
+      }
+    });
+
+    this.addCommand({
       id: "ai-copilot-run-refinement-now",
       name: "AI Copilot: Run refinement now",
       callback: async () => void this.runRefinementPass()
@@ -88,6 +116,7 @@ export default class AICopilotPlugin extends Plugin {
   async saveSettings() {
     await this.saveData(this.settings);
     this.startRefinementLoop();
+    this.initializeVectorIndex();
   }
 
   private startRefinementLoop() {
@@ -95,6 +124,20 @@ export default class AICopilotPlugin extends Plugin {
     const intervalMs = Math.max(15, this.settings.refinementIntervalMinutes) * 60_000;
     this.intervalId = window.setInterval(() => void this.runRefinementPass(), intervalMs);
     this.registerInterval(this.intervalId);
+  }
+
+  private initializeVectorIndex() {
+    const provider = this.settings.provider === "openai"
+      ? new OpenAIEmbeddingProvider(this.settings)
+      : new FallbackHashEmbeddingProvider();
+    this.vectorIndex = new PersistentVectorIndex(new VaultVectorStorage(this.app), provider);
+  }
+
+  private async getAllNotes() {
+    const files = this.app.vault.getMarkdownFiles();
+    return Promise.all(
+      files.map(async (f) => ({ path: f.path, content: await this.app.vault.read(f), mtime: f.stat.mtime }))
+    );
   }
 
   private async activateChatView() {
@@ -180,18 +223,52 @@ export default class AICopilotPlugin extends Plugin {
     return Promise.all(files.map(async (f) => ({ path: f.path, content: await this.app.vault.read(f) })));
   }
 
-  private async getRelevantNotes(query: string, maxResults: number) {
-    const files = this.app.vault.getMarkdownFiles();
-    const notes = await Promise.all(
-      files.map(async (f) => ({ path: f.path, content: await this.app.vault.read(f), mtime: f.stat.mtime }))
+  private async getRelevantNotes(query: string, maxResults: number): Promise<RetrievedNote[]> {
+    const notes = await this.getAllNotes();
+    const queryTerms = tokenize(query);
+
+    const pre = notes
+      .map((n) => {
+        const lex = lexicalScore(n, queryTerms);
+        const fresh = freshnessScore(n.mtime);
+        return { n, lex, fresh, preScore: lex + 0.25 * fresh };
+      })
+      .sort((a, b) => b.preScore - a.preScore)
+      .slice(0, Math.max(maxResults, this.settings.preselectCandidateCount));
+
+    if (!this.vectorIndex) this.initializeVectorIndex();
+    const queryVec = await this.vectorIndex!.getOrCreate(
+      "__query__",
+      query,
+      this.settings.embeddingModel
     );
 
-    return hybridRetrieve(notes, query, {
-      maxResults,
-      lexicalWeight: this.settings.retrievalLexicalWeight,
-      semanticWeight: this.settings.retrievalSemanticWeight,
-      freshnessWeight: this.settings.retrievalFreshnessWeight,
-      graphExpandHops: this.settings.retrievalGraphExpandHops
-    });
+    const ranked: RetrievedNote[] = [];
+    for (const c of pre) {
+      const docVec = await this.vectorIndex!.getOrCreate(
+        c.n.path,
+        `${c.n.path}
+${c.n.content}`,
+        this.settings.embeddingModel
+      );
+      const sem = cosine(docVec, queryVec);
+      const score =
+        this.settings.retrievalLexicalWeight * c.lex +
+        this.settings.retrievalSemanticWeight * sem +
+        this.settings.retrievalFreshnessWeight * c.fresh;
+      ranked.push({
+        ...c.n,
+        score,
+        lexicalScore: c.lex,
+        semanticScore: sem,
+        freshnessScore: c.fresh,
+        graphBoost: 0,
+        metadata: extractMetadata(c.n.content)
+      });
+    }
+
+    return applyGraphBoost(ranked, maxResults, this.settings.retrievalGraphExpandHops)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, maxResults);
   }
 }

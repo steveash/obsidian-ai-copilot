@@ -15,6 +15,8 @@ export interface AICopilotSettings {
   retrievalSemanticWeight: number;
   retrievalFreshnessWeight: number;
   retrievalGraphExpandHops: number;
+  embeddingModel: string;
+  preselectCandidateCount: number;
 }
 
 export const DEFAULT_SETTINGS: AICopilotSettings = {
@@ -29,7 +31,9 @@ export const DEFAULT_SETTINGS: AICopilotSettings = {
   retrievalLexicalWeight: 0.45,
   retrievalSemanticWeight: 0.45,
   retrievalFreshnessWeight: 0.1,
-  retrievalGraphExpandHops: 1
+  retrievalGraphExpandHops: 1,
+  embeddingModel: "text-embedding-3-large",
+  preselectCandidateCount: 40
 };
 
 export class AICopilotSettingTab extends PluginSettingTab {
@@ -197,6 +201,30 @@ export class AICopilotSettingTab extends PluginSettingTab {
           .setDynamicTooltip()
           .onChange(async (value) => {
             this.plugin.settings.retrievalGraphExpandHops = value;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Embedding model")
+      .setDesc("Remote embedding model for persistent vector index")
+      .addText((t) =>
+        t.setValue(this.plugin.settings.embeddingModel).onChange(async (value) => {
+          this.plugin.settings.embeddingModel = value.trim() || "text-embedding-3-large";
+          await this.plugin.saveSettings();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Preselect candidates")
+      .setDesc("Lexical top-N candidates before vector reranking")
+      .addSlider((s) =>
+        s
+          .setLimits(10, 200, 5)
+          .setValue(this.plugin.settings.preselectCandidateCount)
+          .setDynamicTooltip()
+          .onChange(async (value) => {
+            this.plugin.settings.preselectCandidateCount = value;
             await this.plugin.saveSettings();
           })
       );

@@ -232,31 +232,8 @@ function toMarkdownPlan(plan) {
 }
 
 // src/semantic-retrieval.ts
-var DEFAULT_DIM = 256;
 function tokenize(text) {
   return text.toLowerCase().replace(/[^a-z0-9#\[\]\/\-\s]/g, " ").split(/\s+/).filter((t) => t.length > 1);
-}
-function hashToken(token) {
-  let h = 2166136261;
-  for (let i = 0; i < token.length; i++) {
-    h ^= token.charCodeAt(i);
-    h = Math.imul(h, 16777619);
-  }
-  return Math.abs(h >>> 0);
-}
-function embed(text, dim = DEFAULT_DIM) {
-  const vec = new Array(dim).fill(0);
-  const tokens = tokenize(text);
-  for (const tok of tokens) {
-    const idx = hashToken(tok) % dim;
-    vec[idx] += 1;
-    for (let i = 0; i < Math.max(0, tok.length - 2); i++) {
-      const tri = tok.slice(i, i + 3);
-      vec[hashToken(`tri:${tri}`) % dim] += 0.35;
-    }
-  }
-  const norm = Math.sqrt(vec.reduce((a, b) => a + b * b, 0)) || 1;
-  return vec.map((v) => v / norm);
 }
 function cosine(a, b) {
   let s = 0;
@@ -283,40 +260,132 @@ function freshnessScore(mtime) {
   const ageDays = (Date.now() - mtime) / (1e3 * 60 * 60 * 24);
   return 1 / (1 + Math.max(0, ageDays));
 }
-function hybridRetrieve(notes, query, options) {
-  const qTerms = tokenize(query);
-  const qVec = embed(query);
-  const base = notes.map((doc) => {
-    const metadata = extractMetadata(doc.content);
-    const sem = cosine(embed(`${doc.path}
-${doc.content}`), qVec);
-    const lex = lexicalScore(doc, qTerms);
-    const fresh = freshnessScore(doc.mtime);
-    return {
-      ...doc,
-      metadata,
-      lexicalScore: lex,
-      semanticScore: sem,
-      freshnessScore: fresh,
-      graphBoost: 0,
-      score: options.lexicalWeight * lex + options.semanticWeight * sem + options.freshnessWeight * fresh
-    };
-  });
-  if (options.graphExpandHops > 0) {
-    const pathMap = new Map(base.map((b) => [b.path, b]));
-    const topSeed = [...base].sort((a, b) => b.score - a.score).slice(0, Math.max(3, options.maxResults));
-    for (const seed of topSeed) {
-      for (const link of seed.metadata.links) {
-        const direct = pathMap.get(link) || pathMap.get(`${link}.md`);
-        if (direct) {
-          direct.graphBoost += 0.15;
-          direct.score += 0.15;
-        }
+function applyGraphBoost(results, maxResults, hops) {
+  if (hops <= 0) return results;
+  const pathMap = new Map(results.map((r) => [r.path, r]));
+  const topSeed = [...results].sort((a, b) => b.score - a.score).slice(0, Math.max(3, maxResults));
+  for (const seed of topSeed) {
+    for (const link of seed.metadata.links) {
+      const direct = pathMap.get(link) || pathMap.get(`${link}.md`);
+      if (direct) {
+        direct.graphBoost += 0.15;
+        direct.score += 0.15;
       }
     }
   }
-  return base.sort((a, b) => b.score - a.score).slice(0, options.maxResults);
+  return results;
 }
+
+// src/vector-index.ts
+function contentHash(input) {
+  let h1 = 2166136261;
+  let h2 = 2166136261;
+  for (let i = 0; i < input.length; i++) {
+    const c = input.charCodeAt(i);
+    h1 ^= c;
+    h1 = Math.imul(h1, 16777619);
+    h2 ^= c + 31;
+    h2 = Math.imul(h2, 16777619);
+  }
+  return `${(h1 >>> 0).toString(16)}${(h2 >>> 0).toString(16)}`;
+}
+var PersistentVectorIndex = class {
+  constructor(storage, provider) {
+    this.storage = storage;
+    this.provider = provider;
+    this.cache = null;
+  }
+  async ensureLoaded() {
+    if (!this.cache) this.cache = await this.storage.load();
+  }
+  async getOrCreate(path, content, model) {
+    await this.ensureLoaded();
+    const hash = contentHash(content);
+    const rec = this.cache.records[path];
+    if (rec && rec.contentHash === hash && rec.model === model) return rec.vector;
+    const vector = await this.provider.embed(content, model);
+    this.cache.records[path] = {
+      path,
+      contentHash: hash,
+      model,
+      vector,
+      updatedAt: Date.now()
+    };
+    await this.storage.save(this.cache);
+    return vector;
+  }
+  async rebuild(entries, model) {
+    await this.ensureLoaded();
+    for (const e of entries) {
+      await this.getOrCreate(e.path, e.content, model);
+    }
+    return entries.length;
+  }
+};
+
+// src/embedding-provider.ts
+var OpenAIEmbeddingProvider = class {
+  constructor(settings) {
+    this.settings = settings;
+  }
+  async embed(text, model) {
+    if (!this.settings.openaiApiKey) throw new Error("Missing OpenAI API key");
+    const res = await fetch("https://api.openai.com/v1/embeddings", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${this.settings.openaiApiKey}`
+      },
+      body: JSON.stringify({ model, input: text.slice(0, 2e4) })
+    });
+    if (!res.ok) throw new Error(`Embedding request failed: ${res.status} ${await res.text()}`);
+    const json = await res.json();
+    return json.data?.[0]?.embedding ?? [];
+  }
+};
+var FallbackHashEmbeddingProvider = class {
+  async embed(text) {
+    const arr = new Array(256).fill(0);
+    const clean = text.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter(Boolean);
+    for (const t of clean) {
+      let h = 0;
+      for (let i = 0; i < t.length; i++) h = h * 31 + t.charCodeAt(i) >>> 0;
+      arr[h % arr.length] += 1;
+    }
+    const norm = Math.sqrt(arr.reduce((a, b) => a + b * b, 0)) || 1;
+    return arr.map((x) => x / norm);
+  }
+};
+
+// src/vault-vector-storage.ts
+var INDEX_PATH = "AI Copilot/.index/vectors.json";
+var VaultVectorStorage = class {
+  constructor(app) {
+    this.app = app;
+  }
+  async load() {
+    const f = this.app.vault.getAbstractFileByPath(INDEX_PATH);
+    if (!f) return { version: 1, records: {} };
+    const text = await this.app.vault.read(f);
+    try {
+      const parsed = JSON.parse(text);
+      if (parsed?.version === 1 && parsed.records) return parsed;
+      return { version: 1, records: {} };
+    } catch {
+      return { version: 1, records: {} };
+    }
+  }
+  async save(data) {
+    const folder = this.app.vault.getAbstractFileByPath("AI Copilot");
+    if (!folder) await this.app.vault.createFolder("AI Copilot");
+    const idxFolder = this.app.vault.getAbstractFileByPath("AI Copilot/.index");
+    if (!idxFolder) await this.app.vault.createFolder("AI Copilot/.index");
+    const existing = this.app.vault.getAbstractFileByPath(INDEX_PATH);
+    const content = JSON.stringify(data);
+    if (existing) await this.app.vault.modify(existing, content);
+    else await this.app.vault.create(INDEX_PATH, content);
+  }
+};
 
 // src/safety.ts
 var API_KEY_PATTERNS = [
@@ -345,7 +414,9 @@ var DEFAULT_SETTINGS = {
   retrievalLexicalWeight: 0.45,
   retrievalSemanticWeight: 0.45,
   retrievalFreshnessWeight: 0.1,
-  retrievalGraphExpandHops: 1
+  retrievalGraphExpandHops: 1,
+  embeddingModel: "text-embedding-3-large",
+  preselectCandidateCount: 40
 };
 var AICopilotSettingTab = class extends import_obsidian2.PluginSettingTab {
   constructor(app, plugin) {
@@ -431,6 +502,18 @@ var AICopilotSettingTab = class extends import_obsidian2.PluginSettingTab {
         await this.plugin.saveSettings();
       })
     );
+    new import_obsidian2.Setting(containerEl).setName("Embedding model").setDesc("Remote embedding model for persistent vector index").addText(
+      (t) => t.setValue(this.plugin.settings.embeddingModel).onChange(async (value) => {
+        this.plugin.settings.embeddingModel = value.trim() || "text-embedding-3-large";
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian2.Setting(containerEl).setName("Preselect candidates").setDesc("Lexical top-N candidates before vector reranking").addSlider(
+      (s) => s.setLimits(10, 200, 5).setValue(this.plugin.settings.preselectCandidateCount).setDynamicTooltip().onChange(async (value) => {
+        this.plugin.settings.preselectCandidateCount = value;
+        await this.plugin.saveSettings();
+      })
+    );
   }
 };
 
@@ -440,10 +523,12 @@ var AICopilotPlugin = class extends import_obsidian3.Plugin {
     super(...arguments);
     this.settings = DEFAULT_SETTINGS;
     this.intervalId = null;
+    this.vectorIndex = null;
   }
   async onload() {
     await this.loadSettings();
     this.addSettingTab(new AICopilotSettingTab(this.app, this));
+    this.initializeVectorIndex();
     this.registerView(AI_COPILOT_VIEW, (leaf) => new AICopilotChatView(leaf, this.app));
     this.addCommand({
       id: "ai-copilot-open-chat-panel",
@@ -497,6 +582,20 @@ ${output}`);
       }
     });
     this.addCommand({
+      id: "ai-copilot-rebuild-vector-index",
+      name: "AI Copilot: Rebuild persistent vector index",
+      callback: async () => {
+        const notes = await this.getAllNotes();
+        if (!this.vectorIndex) this.initializeVectorIndex();
+        const count = await this.vectorIndex.rebuild(
+          notes.map((n) => ({ path: n.path, content: `${n.path}
+${n.content}` })),
+          this.settings.embeddingModel
+        );
+        new import_obsidian3.Notice(`AI Copilot: rebuilt vector index for ${count} notes.`);
+      }
+    });
+    this.addCommand({
       id: "ai-copilot-run-refinement-now",
       name: "AI Copilot: Run refinement now",
       callback: async () => void this.runRefinementPass()
@@ -513,12 +612,23 @@ ${output}`);
   async saveSettings() {
     await this.saveData(this.settings);
     this.startRefinementLoop();
+    this.initializeVectorIndex();
   }
   startRefinementLoop() {
     if (this.intervalId) window.clearInterval(this.intervalId);
     const intervalMs = Math.max(15, this.settings.refinementIntervalMinutes) * 6e4;
     this.intervalId = window.setInterval(() => void this.runRefinementPass(), intervalMs);
     this.registerInterval(this.intervalId);
+  }
+  initializeVectorIndex() {
+    const provider = this.settings.provider === "openai" ? new OpenAIEmbeddingProvider(this.settings) : new FallbackHashEmbeddingProvider();
+    this.vectorIndex = new PersistentVectorIndex(new VaultVectorStorage(this.app), provider);
+  }
+  async getAllNotes() {
+    const files = this.app.vault.getMarkdownFiles();
+    return Promise.all(
+      files.map(async (f) => ({ path: f.path, content: await this.app.vault.read(f), mtime: f.stat.mtime }))
+    );
   }
   async activateChatView() {
     const { workspace } = this.app;
@@ -613,16 +723,39 @@ ${(/* @__PURE__ */ new Date()).toISOString()}
     return Promise.all(files.map(async (f) => ({ path: f.path, content: await this.app.vault.read(f) })));
   }
   async getRelevantNotes(query, maxResults) {
-    const files = this.app.vault.getMarkdownFiles();
-    const notes = await Promise.all(
-      files.map(async (f) => ({ path: f.path, content: await this.app.vault.read(f), mtime: f.stat.mtime }))
+    const notes = await this.getAllNotes();
+    const queryTerms = tokenize(query);
+    const pre = notes.map((n) => {
+      const lex = lexicalScore(n, queryTerms);
+      const fresh = freshnessScore(n.mtime);
+      return { n, lex, fresh, preScore: lex + 0.25 * fresh };
+    }).sort((a, b) => b.preScore - a.preScore).slice(0, Math.max(maxResults, this.settings.preselectCandidateCount));
+    if (!this.vectorIndex) this.initializeVectorIndex();
+    const queryVec = await this.vectorIndex.getOrCreate(
+      "__query__",
+      query,
+      this.settings.embeddingModel
     );
-    return hybridRetrieve(notes, query, {
-      maxResults,
-      lexicalWeight: this.settings.retrievalLexicalWeight,
-      semanticWeight: this.settings.retrievalSemanticWeight,
-      freshnessWeight: this.settings.retrievalFreshnessWeight,
-      graphExpandHops: this.settings.retrievalGraphExpandHops
-    });
+    const ranked = [];
+    for (const c of pre) {
+      const docVec = await this.vectorIndex.getOrCreate(
+        c.n.path,
+        `${c.n.path}
+${c.n.content}`,
+        this.settings.embeddingModel
+      );
+      const sem = cosine(docVec, queryVec);
+      const score = this.settings.retrievalLexicalWeight * c.lex + this.settings.retrievalSemanticWeight * sem + this.settings.retrievalFreshnessWeight * c.fresh;
+      ranked.push({
+        ...c.n,
+        score,
+        lexicalScore: c.lex,
+        semanticScore: sem,
+        freshnessScore: c.fresh,
+        graphBoost: 0,
+        metadata: extractMetadata(c.n.content)
+      });
+    }
+    return applyGraphBoost(ranked, maxResults, this.settings.retrievalGraphExpandHops).sort((a, b) => b.score - a.score).slice(0, maxResults);
   }
 };

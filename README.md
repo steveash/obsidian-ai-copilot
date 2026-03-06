@@ -94,3 +94,13 @@ Implemented a local **hybrid retrieval** pipeline inspired by common RAG best pr
 - Metadata extraction (`tags`, `headings`, `links`) for future filtering/reranking
 
 This gives better robustness for both exact-term and concept-level queries while staying fully local/private.
+
+
+## Persistent vector index (new)
+
+- Embeddings are persisted to `AI Copilot/.index/vectors.json` inside the vault.
+- Uses OpenAI embeddings endpoint by default (`text-embedding-3-large`) when provider is OpenAI.
+- Retrieval flow is now two-stage:
+  1) lexical preselect top-N
+  2) vector rerank + freshness + wikilink graph boost
+- Command added: **AI Copilot: Rebuild persistent vector index**
