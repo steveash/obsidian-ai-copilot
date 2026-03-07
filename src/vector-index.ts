@@ -1,13 +1,17 @@
 export interface StoredVector {
+  id: string;
   path: string;
+  chunkId?: string;
   contentHash: string;
   model: string;
   vector: number[];
   updatedAt: number;
+  mtime?: number;
+  textPreview?: string;
 }
 
 export interface VectorIndexData {
-  version: 1;
+  version: 2;
   records: Record<string, StoredVector>;
 }
 
@@ -21,7 +25,7 @@ export interface EmbeddingProvider {
 }
 
 export class InMemoryVectorStorage implements VectorStorage {
-  private data: VectorIndexData = { version: 1, records: {} };
+  private data: VectorIndexData = { version: 2, records: {} };
   async load(): Promise<VectorIndexData> { return this.data; }
   async save(data: VectorIndexData): Promise<void> { this.data = data; }
 }
@@ -44,32 +48,48 @@ export class PersistentVectorIndex {
   constructor(private readonly storage: VectorStorage, private readonly provider: EmbeddingProvider) {}
 
   private async ensureLoaded() {
-    if (!this.cache) this.cache = await this.storage.load();
+    if (!this.cache) {
+      const loaded = await this.storage.load();
+      // migrate v1->v2 defensively
+      this.cache = loaded.version === 2 ? loaded : ({ version: 2, records: (loaded as any).records ?? {} } as VectorIndexData);
+    }
   }
 
-  async getOrCreate(path: string, content: string, model: string): Promise<number[]> {
+  async getOrCreate(id: string, path: string, content: string, model: string, mtime?: number): Promise<number[]> {
     await this.ensureLoaded();
     const hash = contentHash(content);
-    const rec = this.cache!.records[path];
+    const rec = this.cache!.records[id];
     if (rec && rec.contentHash === hash && rec.model === model) return rec.vector;
 
     const vector = await this.provider.embed(content, model);
-    this.cache!.records[path] = {
+    this.cache!.records[id] = {
+      id,
       path,
+      chunkId: id.includes("#") ? id : undefined,
       contentHash: hash,
       model,
       vector,
-      updatedAt: Date.now()
+      updatedAt: Date.now(),
+      mtime,
+      textPreview: content.slice(0, 180)
     };
     await this.storage.save(this.cache!);
     return vector;
   }
 
-  async rebuild(entries: Array<{ path: string; content: string }>, model: string): Promise<number> {
+  async indexChunks(chunks: Array<{ id: string; path: string; content: string; mtime?: number }>, model: string): Promise<number> {
     await this.ensureLoaded();
-    for (const e of entries) {
-      await this.getOrCreate(e.path, e.content, model);
+    for (const c of chunks) {
+      await this.getOrCreate(c.id, c.path, c.content, model, c.mtime);
     }
-    return entries.length;
+    return chunks.length;
+  }
+
+  async removePath(path: string): Promise<void> {
+    await this.ensureLoaded();
+    for (const key of Object.keys(this.cache!.records)) {
+      if (this.cache!.records[key].path === path) delete this.cache!.records[key];
+    }
+    await this.storage.save(this.cache!);
   }
 }

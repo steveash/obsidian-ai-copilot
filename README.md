@@ -104,3 +104,12 @@ This gives better robustness for both exact-term and concept-level queries while
   1) lexical preselect top-N
   2) vector rerank + freshness + wikilink graph boost
 - Command added: **AI Copilot: Rebuild persistent vector index**
+
+
+## Added retrieval upgrades
+
+- Incremental vector updates on note modify/delete events
+- Chunk-level embeddings (heading-based chunks)
+- Optional reranker pass for top-k results
+
+This improves long-note retrieval quality and keeps index fresh without full rebuilds.

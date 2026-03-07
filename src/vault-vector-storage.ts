@@ -8,14 +8,16 @@ export class VaultVectorStorage implements VectorStorage {
 
   async load(): Promise<VectorIndexData> {
     const f = this.app.vault.getAbstractFileByPath(INDEX_PATH);
-    if (!f) return { version: 1, records: {} };
+    if (!f) return { version: 2, records: {} };
     const text = await this.app.vault.read(f as TFile);
     try {
-      const parsed = JSON.parse(text) as VectorIndexData;
-      if (parsed?.version === 1 && parsed.records) return parsed;
-      return { version: 1, records: {} };
+      const parsed = JSON.parse(text) as any;
+      if (parsed?.records) {
+        return { version: 2, records: parsed.records };
+      }
+      return { version: 2, records: {} };
     } catch {
-      return { version: 1, records: {} };
+      return { version: 2, records: {} };
     }
   }
 

@@ -296,30 +296,44 @@ var PersistentVectorIndex = class {
     this.cache = null;
   }
   async ensureLoaded() {
-    if (!this.cache) this.cache = await this.storage.load();
+    if (!this.cache) {
+      const loaded = await this.storage.load();
+      this.cache = loaded.version === 2 ? loaded : { version: 2, records: loaded.records ?? {} };
+    }
   }
-  async getOrCreate(path, content, model) {
+  async getOrCreate(id, path, content, model, mtime) {
     await this.ensureLoaded();
     const hash = contentHash(content);
-    const rec = this.cache.records[path];
+    const rec = this.cache.records[id];
     if (rec && rec.contentHash === hash && rec.model === model) return rec.vector;
     const vector = await this.provider.embed(content, model);
-    this.cache.records[path] = {
+    this.cache.records[id] = {
+      id,
       path,
+      chunkId: id.includes("#") ? id : void 0,
       contentHash: hash,
       model,
       vector,
-      updatedAt: Date.now()
+      updatedAt: Date.now(),
+      mtime,
+      textPreview: content.slice(0, 180)
     };
     await this.storage.save(this.cache);
     return vector;
   }
-  async rebuild(entries, model) {
+  async indexChunks(chunks, model) {
     await this.ensureLoaded();
-    for (const e of entries) {
-      await this.getOrCreate(e.path, e.content, model);
+    for (const c of chunks) {
+      await this.getOrCreate(c.id, c.path, c.content, model, c.mtime);
     }
-    return entries.length;
+    return chunks.length;
+  }
+  async removePath(path) {
+    await this.ensureLoaded();
+    for (const key of Object.keys(this.cache.records)) {
+      if (this.cache.records[key].path === path) delete this.cache.records[key];
+    }
+    await this.storage.save(this.cache);
   }
 };
 
@@ -365,14 +379,16 @@ var VaultVectorStorage = class {
   }
   async load() {
     const f = this.app.vault.getAbstractFileByPath(INDEX_PATH);
-    if (!f) return { version: 1, records: {} };
+    if (!f) return { version: 2, records: {} };
     const text = await this.app.vault.read(f);
     try {
       const parsed = JSON.parse(text);
-      if (parsed?.version === 1 && parsed.records) return parsed;
-      return { version: 1, records: {} };
+      if (parsed?.records) {
+        return { version: 2, records: parsed.records };
+      }
+      return { version: 2, records: {} };
     } catch {
-      return { version: 1, records: {} };
+      return { version: 2, records: {} };
     }
   }
   async save(data) {
@@ -384,6 +400,71 @@ var VaultVectorStorage = class {
     const content = JSON.stringify(data);
     if (existing) await this.app.vault.modify(existing, content);
     else await this.app.vault.create(INDEX_PATH, content);
+  }
+};
+
+// src/chunker.ts
+function normalizeHeading(line) {
+  return line.replace(/^#{1,6}\s+/, "").trim() || "(untitled section)";
+}
+function chunkMarkdownByHeading(path, markdown, maxChars = 1200) {
+  const lines = markdown.split(/\r?\n/);
+  const chunks = [];
+  let currentHeading = "Document";
+  let buffer = [];
+  let order = 0;
+  const flush = () => {
+    if (!buffer.length) return;
+    const raw = buffer.join("\n").trim();
+    buffer = [];
+    if (!raw) return;
+    if (raw.length <= maxChars) {
+      chunks.push({
+        chunkId: `${path}#${order++}`,
+        path,
+        heading: currentHeading,
+        text: raw,
+        order
+      });
+      return;
+    }
+    for (let i = 0; i < raw.length; i += maxChars) {
+      chunks.push({
+        chunkId: `${path}#${order++}`,
+        path,
+        heading: currentHeading,
+        text: raw.slice(i, i + maxChars),
+        order
+      });
+    }
+  };
+  for (const line of lines) {
+    if (/^#{1,6}\s+/.test(line)) {
+      flush();
+      currentHeading = normalizeHeading(line);
+      continue;
+    }
+    buffer.push(line);
+  }
+  flush();
+  if (!chunks.length) {
+    chunks.push({ chunkId: `${path}#0`, path, heading: "Document", text: markdown.slice(0, maxChars), order: 0 });
+  }
+  return chunks;
+}
+
+// src/reranker.ts
+var HeuristicReranker = class {
+  async rerank(query, candidates) {
+    const q = query.toLowerCase();
+    const terms = q.split(/\s+/).filter(Boolean);
+    return [...candidates].map((c) => {
+      const t = c.text.toLowerCase();
+      const termHits = terms.reduce((acc, term) => t.includes(term) ? acc + 1 : acc, 0);
+      const phraseBonus = t.includes(q) ? 0.5 : 0;
+      const headingBonus = /(^|\n)#{1,6}\s/.test(c.text) ? 0.1 : 0;
+      return { ...c, score: c.score + termHits * 0.08 + phraseBonus + headingBonus };
+    }).sort((a, b) => b.score - a.score);
   }
 };
 
@@ -416,7 +497,10 @@ var DEFAULT_SETTINGS = {
   retrievalFreshnessWeight: 0.1,
   retrievalGraphExpandHops: 1,
   embeddingModel: "text-embedding-3-large",
-  preselectCandidateCount: 40
+  preselectCandidateCount: 40,
+  retrievalChunkSize: 1200,
+  rerankerEnabled: true,
+  rerankerTopK: 8
 };
 var AICopilotSettingTab = class extends import_obsidian2.PluginSettingTab {
   constructor(app, plugin) {
@@ -514,6 +598,24 @@ var AICopilotSettingTab = class extends import_obsidian2.PluginSettingTab {
         await this.plugin.saveSettings();
       })
     );
+    new import_obsidian2.Setting(containerEl).setName("Chunk size (chars)").setDesc("Approximate section chunk size for vector indexing").addSlider(
+      (s) => s.setLimits(400, 3e3, 100).setValue(this.plugin.settings.retrievalChunkSize).setDynamicTooltip().onChange(async (value) => {
+        this.plugin.settings.retrievalChunkSize = value;
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian2.Setting(containerEl).setName("Enable reranker").setDesc("Second-pass rerank on top retrieved chunks").addToggle(
+      (tg) => tg.setValue(this.plugin.settings.rerankerEnabled).onChange(async (value) => {
+        this.plugin.settings.rerankerEnabled = value;
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian2.Setting(containerEl).setName("Reranker top-k").setDesc("How many results get reranker pass").addSlider(
+      (s) => s.setLimits(3, 20, 1).setValue(this.plugin.settings.rerankerTopK).setDynamicTooltip().onChange(async (value) => {
+        this.plugin.settings.rerankerTopK = value;
+        await this.plugin.saveSettings();
+      })
+    );
   }
 };
 
@@ -601,6 +703,30 @@ ${n.content}` })),
       callback: async () => void this.runRefinementPass()
     });
     this.startRefinementLoop();
+    this.registerEvent(
+      this.app.vault.on("modify", async (file) => {
+        if (!("path" in file) || !file.path.endsWith(".md")) return;
+        if (!this.vectorIndex) this.initializeVectorIndex();
+        const tf = file;
+        const content = await this.app.vault.read(tf);
+        const chunks = chunkMarkdownByHeading(tf.path, content, this.settings.retrievalChunkSize).map((c) => ({
+          id: c.chunkId,
+          path: c.path,
+          content: `${c.path}
+${c.heading}
+${c.text}`,
+          mtime: tf.stat.mtime
+        }));
+        await this.vectorIndex.indexChunks(chunks, this.settings.embeddingModel);
+      })
+    );
+    this.registerEvent(
+      this.app.vault.on("delete", async (file) => {
+        if (!("path" in file) || !file.path.endsWith(".md")) return;
+        if (!this.vectorIndex) this.initializeVectorIndex();
+        await this.vectorIndex.removePath(file.path);
+      })
+    );
     new import_obsidian3.Notice("AI Copilot loaded.");
   }
   onunload() {
@@ -733,29 +859,54 @@ ${(/* @__PURE__ */ new Date()).toISOString()}
     if (!this.vectorIndex) this.initializeVectorIndex();
     const queryVec = await this.vectorIndex.getOrCreate(
       "__query__",
+      "__query__",
       query,
       this.settings.embeddingModel
     );
     const ranked = [];
     for (const c of pre) {
-      const docVec = await this.vectorIndex.getOrCreate(
-        c.n.path,
-        `${c.n.path}
-${c.n.content}`,
-        this.settings.embeddingModel
-      );
-      const sem = cosine(docVec, queryVec);
-      const score = this.settings.retrievalLexicalWeight * c.lex + this.settings.retrievalSemanticWeight * sem + this.settings.retrievalFreshnessWeight * c.fresh;
-      ranked.push({
-        ...c.n,
-        score,
-        lexicalScore: c.lex,
-        semanticScore: sem,
-        freshnessScore: c.fresh,
-        graphBoost: 0,
-        metadata: extractMetadata(c.n.content)
-      });
+      const chunks = chunkMarkdownByHeading(c.n.path, c.n.content, this.settings.retrievalChunkSize);
+      for (const ch of chunks) {
+        const chunkContent = `${c.n.path}
+${ch.heading}
+${ch.text}`;
+        const docVec = await this.vectorIndex.getOrCreate(
+          ch.chunkId,
+          c.n.path,
+          chunkContent,
+          this.settings.embeddingModel,
+          c.n.mtime
+        );
+        const sem = cosine(docVec, queryVec);
+        const score = this.settings.retrievalLexicalWeight * c.lex + this.settings.retrievalSemanticWeight * sem + this.settings.retrievalFreshnessWeight * c.fresh;
+        ranked.push({
+          path: c.n.path,
+          content: `# ${ch.heading}
+${ch.text}`,
+          mtime: c.n.mtime,
+          score,
+          lexicalScore: c.lex,
+          semanticScore: sem,
+          freshnessScore: c.fresh,
+          graphBoost: 0,
+          metadata: extractMetadata(c.n.content)
+        });
+      }
     }
-    return applyGraphBoost(ranked, maxResults, this.settings.retrievalGraphExpandHops).sort((a, b) => b.score - a.score).slice(0, maxResults);
+    let final = applyGraphBoost(ranked, Math.max(maxResults, this.settings.rerankerTopK), this.settings.retrievalGraphExpandHops).sort((a, b) => b.score - a.score).slice(0, Math.max(maxResults, this.settings.rerankerTopK));
+    if (this.settings.rerankerEnabled) {
+      const reranker = new HeuristicReranker();
+      const reranked = await reranker.rerank(
+        query,
+        final.slice(0, this.settings.rerankerTopK).map((x, i) => ({ id: `${i}:${x.path}`, text: `${x.path}
+${x.content}`, score: x.score }))
+      );
+      const map = new Map(final.map((x) => [`${x.path}
+${x.content}`, x]));
+      final = reranked.map((r) => map.get(r.text)).filter((x) => Boolean(x)).concat(final).slice(0, maxResults);
+    } else {
+      final = final.slice(0, maxResults);
+    }
+    return final;
   }
 };

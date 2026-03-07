@@ -1,7 +1,7 @@
 {
   "id": "obsidian-ai-copilot",
   "name": "AI Copilot",
-  "version": "0.0.8",
+  "version": "0.0.9",
   "minAppVersion": "1.5.0",
   "description": "AI assistant plugin for chat over notes and scheduled note refinement.",
   "author": "Steve",

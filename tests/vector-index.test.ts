@@ -15,15 +15,15 @@ describe("PersistentVectorIndex", () => {
     const provider = new MockProvider();
     const idx = new PersistentVectorIndex(storage, provider);
 
-    const a1 = await idx.getOrCreate("a.md", "hello", "m1");
-    const a2 = await idx.getOrCreate("a.md", "hello", "m1");
+    const a1 = await idx.getOrCreate("a.md#0", "a.md", "hello", "m1");
+    const a2 = await idx.getOrCreate("a.md#0", "a.md", "hello", "m1");
     expect(a1).toEqual(a2);
     expect(provider.calls).toBe(1);
 
-    await idx.getOrCreate("a.md", "hello world", "m1");
+    await idx.getOrCreate("a.md#0", "a.md", "hello world", "m1");
     expect(provider.calls).toBe(2);
 
-    await idx.getOrCreate("a.md", "hello world", "m2");
+    await idx.getOrCreate("a.md#0", "a.md", "hello world", "m2");
     expect(provider.calls).toBe(3);
   });
 });

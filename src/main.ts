@@ -16,6 +16,8 @@ import {
 import { PersistentVectorIndex } from "./vector-index";
 import { OpenAIEmbeddingProvider, FallbackHashEmbeddingProvider } from "./embedding-provider";
 import { VaultVectorStorage } from "./vault-vector-storage";
+import { chunkMarkdownByHeading } from "./chunker";
+import { HeuristicReranker } from "./reranker";
 import { redactSensitive } from "./safety";
 import { AICopilotSettingTab, DEFAULT_SETTINGS, type AICopilotSettings } from "./settings";
 
@@ -102,6 +104,31 @@ ${n.content}` })),
     });
 
     this.startRefinementLoop();
+
+    this.registerEvent(
+      this.app.vault.on("modify", async (file) => {
+        if (!("path" in file) || !file.path.endsWith(".md")) return;
+        if (!this.vectorIndex) this.initializeVectorIndex();
+        const tf = file as TFile;
+        const content = await this.app.vault.read(tf);
+        const chunks = chunkMarkdownByHeading(tf.path, content, this.settings.retrievalChunkSize).map((c) => ({
+          id: c.chunkId,
+          path: c.path,
+          content: `${c.path}\n${c.heading}\n${c.text}`,
+          mtime: tf.stat.mtime
+        }));
+        await this.vectorIndex!.indexChunks(chunks, this.settings.embeddingModel);
+      })
+    );
+
+    this.registerEvent(
+      this.app.vault.on("delete", async (file) => {
+        if (!("path" in file) || !file.path.endsWith(".md")) return;
+        if (!this.vectorIndex) this.initializeVectorIndex();
+        await this.vectorIndex!.removePath((file as any).path);
+      })
+    );
+
     new Notice("AI Copilot loaded.");
   }
 
@@ -239,36 +266,67 @@ ${n.content}` })),
     if (!this.vectorIndex) this.initializeVectorIndex();
     const queryVec = await this.vectorIndex!.getOrCreate(
       "__query__",
+      "__query__",
       query,
       this.settings.embeddingModel
     );
 
     const ranked: RetrievedNote[] = [];
     for (const c of pre) {
-      const docVec = await this.vectorIndex!.getOrCreate(
-        c.n.path,
-        `${c.n.path}
-${c.n.content}`,
-        this.settings.embeddingModel
-      );
-      const sem = cosine(docVec, queryVec);
-      const score =
-        this.settings.retrievalLexicalWeight * c.lex +
-        this.settings.retrievalSemanticWeight * sem +
-        this.settings.retrievalFreshnessWeight * c.fresh;
-      ranked.push({
-        ...c.n,
-        score,
-        lexicalScore: c.lex,
-        semanticScore: sem,
-        freshnessScore: c.fresh,
-        graphBoost: 0,
-        metadata: extractMetadata(c.n.content)
-      });
+      const chunks = chunkMarkdownByHeading(c.n.path, c.n.content, this.settings.retrievalChunkSize);
+      for (const ch of chunks) {
+        const chunkContent = `${c.n.path}
+${ch.heading}
+${ch.text}`;
+        const docVec = await this.vectorIndex!.getOrCreate(
+          ch.chunkId,
+          c.n.path,
+          chunkContent,
+          this.settings.embeddingModel,
+          c.n.mtime
+        );
+        const sem = cosine(docVec, queryVec);
+        const score =
+          this.settings.retrievalLexicalWeight * c.lex +
+          this.settings.retrievalSemanticWeight * sem +
+          this.settings.retrievalFreshnessWeight * c.fresh;
+        ranked.push({
+          path: c.n.path,
+          content: `# ${ch.heading}
+${ch.text}`,
+          mtime: c.n.mtime,
+          score,
+          lexicalScore: c.lex,
+          semanticScore: sem,
+          freshnessScore: c.fresh,
+          graphBoost: 0,
+          metadata: extractMetadata(c.n.content)
+        });
+      }
     }
 
-    return applyGraphBoost(ranked, maxResults, this.settings.retrievalGraphExpandHops)
+    let final = applyGraphBoost(ranked, Math.max(maxResults, this.settings.rerankerTopK), this.settings.retrievalGraphExpandHops)
       .sort((a, b) => b.score - a.score)
-      .slice(0, maxResults);
+      .slice(0, Math.max(maxResults, this.settings.rerankerTopK));
+
+    if (this.settings.rerankerEnabled) {
+      const reranker = new HeuristicReranker();
+      const reranked = await reranker.rerank(
+        query,
+        final.slice(0, this.settings.rerankerTopK).map((x, i) => ({ id: `${i}:${x.path}`, text: `${x.path}
+${x.content}`, score: x.score }))
+      );
+      const map = new Map(final.map((x) => [`${x.path}
+${x.content}`, x]));
+      final = reranked
+        .map((r) => map.get(r.text))
+        .filter((x): x is RetrievedNote => Boolean(x))
+        .concat(final)
+        .slice(0, maxResults);
+    } else {
+      final = final.slice(0, maxResults);
+    }
+
+    return final;
   }
 }

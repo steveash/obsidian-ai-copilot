@@ -17,6 +17,9 @@ export interface AICopilotSettings {
   retrievalGraphExpandHops: number;
   embeddingModel: string;
   preselectCandidateCount: number;
+  retrievalChunkSize: number;
+  rerankerEnabled: boolean;
+  rerankerTopK: number;
 }
 
 export const DEFAULT_SETTINGS: AICopilotSettings = {
@@ -33,7 +36,10 @@ export const DEFAULT_SETTINGS: AICopilotSettings = {
   retrievalFreshnessWeight: 0.1,
   retrievalGraphExpandHops: 1,
   embeddingModel: "text-embedding-3-large",
-  preselectCandidateCount: 40
+  preselectCandidateCount: 40,
+  retrievalChunkSize: 1200,
+  rerankerEnabled: true,
+  rerankerTopK: 8
 };
 
 export class AICopilotSettingTab extends PluginSettingTab {
@@ -225,6 +231,44 @@ export class AICopilotSettingTab extends PluginSettingTab {
           .setDynamicTooltip()
           .onChange(async (value) => {
             this.plugin.settings.preselectCandidateCount = value;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Chunk size (chars)")
+      .setDesc("Approximate section chunk size for vector indexing")
+      .addSlider((s) =>
+        s
+          .setLimits(400, 3000, 100)
+          .setValue(this.plugin.settings.retrievalChunkSize)
+          .setDynamicTooltip()
+          .onChange(async (value) => {
+            this.plugin.settings.retrievalChunkSize = value;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Enable reranker")
+      .setDesc("Second-pass rerank on top retrieved chunks")
+      .addToggle((tg) =>
+        tg.setValue(this.plugin.settings.rerankerEnabled).onChange(async (value) => {
+          this.plugin.settings.rerankerEnabled = value;
+          await this.plugin.saveSettings();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Reranker top-k")
+      .setDesc("How many results get reranker pass")
+      .addSlider((s) =>
+        s
+          .setLimits(3, 20, 1)
+          .setValue(this.plugin.settings.rerankerTopK)
+          .setDynamicTooltip()
+          .onChange(async (value) => {
+            this.plugin.settings.rerankerTopK = value;
             await this.plugin.saveSettings();
           })
       );
