@@ -3,6 +3,7 @@ export interface NotePatch {
   find: string;
   replace: string;
   reason: string;
+  replaceAll?: boolean;
 }
 
 export interface ApplyResult {
@@ -65,10 +66,13 @@ export function applyPatch(content: string, patch: NotePatch): ApplyResult {
       occurrences: 0
     };
   }
+  const updatedContent = patch.replaceAll
+    ? content.split(patch.find).join(patch.replace)
+    : content.replace(patch.find, patch.replace);
   return {
     path: patch.path,
     applied: true,
-    updatedContent: content.replace(patch.find, patch.replace),
+    updatedContent,
     occurrences
   };
 }

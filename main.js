@@ -54,10 +54,11 @@ function applyPatch(content, patch) {
       occurrences: 0
     };
   }
+  const updatedContent = patch.replaceAll ? content.split(patch.find).join(patch.replace) : content.replace(patch.find, patch.replace);
   return {
     path: patch.path,
     applied: true,
-    updatedContent: content.replace(patch.find, patch.replace),
+    updatedContent,
     occurrences
   };
 }
@@ -131,10 +132,15 @@ function validatePatchPlan(plan) {
   if (!Array.isArray(plan.edits) || plan.edits.length === 0) {
     issues.push("at least one edit is required");
   }
+  const seenEditKeys = /* @__PURE__ */ new Set();
   plan.edits.forEach((edit, idx) => {
     if (!edit.find) issues.push(`edit ${idx + 1}: find is required`);
+    if (edit.find.length > 2e4) issues.push(`edit ${idx + 1}: find token is too large`);
     if (edit.find === edit.replace) issues.push(`edit ${idx + 1}: find and replace are identical`);
     if (!edit.reason?.trim()) issues.push(`edit ${idx + 1}: reason is required`);
+    const dedupeKey = `${edit.find}\0${edit.replace}\0${Boolean(edit.replaceAll)}`;
+    if (seenEditKeys.has(dedupeKey)) issues.push(`edit ${idx + 1}: duplicate edit`);
+    seenEditKeys.add(dedupeKey);
   });
   return { valid: issues.length === 0, issues };
 }
@@ -145,16 +151,18 @@ function previewPatchPlan(content, plan) {
       path: plan.path,
       find: edit.find,
       replace: edit.replace,
-      reason: edit.reason
+      reason: edit.reason,
+      replaceAll: edit.replaceAll
     });
     if (p.applied) {
-      next = next.replace(edit.find, edit.replace);
+      next = edit.replaceAll ? next.split(edit.find).join(edit.replace) : next.replace(edit.find, edit.replace);
     }
     return {
       index: idx + 1,
       reason: edit.reason,
       applied: p.applied,
       occurrences: p.occurrences,
+      status: p.applied ? "applied" : "no-op (find text not found)",
       beforeSample: p.beforeSample,
       afterSample: p.afterSample
     };
@@ -175,7 +183,8 @@ function applyPatchPlan(content, plan) {
     path: plan.path,
     find: edit.find,
     replace: edit.replace,
-    reason: edit.reason
+    reason: edit.reason,
+    replaceAll: edit.replaceAll
   }));
   const applied = applyPatchSet(content, patches);
   const appliedCount = applied.transactions.filter((tx) => tx.applied).length;
@@ -199,6 +208,7 @@ function toMarkdownPatchPlanPreview(preview) {
   for (const edit of preview.edits) {
     lines.push(`### Edit ${edit.index}: ${edit.reason}`);
     lines.push(`- Applied: ${edit.applied ? "yes" : "no"}`);
+    lines.push(`- Status: ${edit.status}`);
     lines.push(`- Occurrences: ${edit.occurrences}`);
     lines.push("- Before sample:");
     lines.push("```md");
@@ -1491,7 +1501,7 @@ function registerPluginCommands(ctx, chat, indexing) {
         path: file.path,
         title: "Normalize common markdown spacing",
         edits: [
-          { find: "  ", replace: " ", reason: "normalize spacing" },
+          { find: "  ", replace: " ", reason: "normalize spacing", replaceAll: true },
           { find: "	", replace: "  ", reason: "replace tabs with spaces" }
         ]
       };
@@ -1559,7 +1569,7 @@ ${prompt}`,
     const patchPlan = {
       path: c.path,
       title: "Auto-normalize spacing",
-      edits: [{ find: "  ", replace: " ", reason: "normalize spacing" }]
+      edits: [{ find: "  ", replace: " ", reason: "normalize spacing", replaceAll: true }]
     };
     if (validatePatchPlan(patchPlan).valid) {
       const applied = applyPatchPlan(c.content, patchPlan);

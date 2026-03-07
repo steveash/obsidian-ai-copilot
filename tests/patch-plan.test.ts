@@ -14,8 +14,8 @@ describe("patch plan validation + preview + rollback", () => {
     path: "plan.md",
     title: "Normalize markdown spacing",
     edits: [
-      { find: "\t", replace: "  ", reason: "expand tabs" },
-      { find: "  ", replace: " ", reason: "collapse double spaces" }
+      { find: "\t", replace: "  ", reason: "expand tabs", replaceAll: true },
+      { find: "  ", replace: " ", reason: "collapse double spaces", replaceAll: true }
     ]
   };
 
@@ -25,10 +25,14 @@ describe("patch plan validation + preview + rollback", () => {
 
     const bad = validatePatchPlan({
       path: "",
-      edits: [{ find: "x", replace: "x", reason: "" }]
+      edits: [
+        { find: "x", replace: "x", reason: "" },
+        { find: "x", replace: "x", reason: "" }
+      ]
     });
     expect(bad.valid).toBe(false);
     expect(bad.issues.length).toBeGreaterThan(1);
+    expect(bad.issues.join(" ")).toContain("duplicate edit");
   });
 
   it("builds richer previews with summary", () => {
@@ -36,9 +40,11 @@ describe("patch plan validation + preview + rollback", () => {
     expect(preview.summary.totalEdits).toBe(2);
     expect(preview.summary.appliedEdits).toBeGreaterThan(0);
     expect(preview.edits[0].beforeSample).toContain("\t");
+    expect(preview.edits[0].status).toContain("applied");
     const md = toMarkdownPatchPlanPreview(preview);
     expect(md).toContain("Patch Plan Preview");
     expect(md).toContain("Summary:");
+    expect(md).toContain("Status:");
   });
 
   it("applies and rolls back consistently", () => {

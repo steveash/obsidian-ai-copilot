@@ -84,7 +84,7 @@ export function registerPluginCommands(
         path: file.path,
         title: "Normalize common markdown spacing",
         edits: [
-          { find: "  ", replace: " ", reason: "normalize spacing" },
+          { find: "  ", replace: " ", reason: "normalize spacing", replaceAll: true },
           { find: "\t", replace: "  ", reason: "replace tabs with spaces" }
         ]
       };
@@ -162,7 +162,7 @@ export async function runRefinementFlow(
     const patchPlan: PatchPlan = {
       path: c.path,
       title: "Auto-normalize spacing",
-      edits: [{ find: "  ", replace: " ", reason: "normalize spacing" }]
+      edits: [{ find: "  ", replace: " ", reason: "normalize spacing", replaceAll: true }]
     };
 
     if (validatePatchPlan(patchPlan).valid) {

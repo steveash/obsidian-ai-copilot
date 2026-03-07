@@ -29,6 +29,18 @@ describe("applyPatch", () => {
     });
     expect(res.applied).toBe(false);
   });
+
+  it("supports replaceAll mode", () => {
+    const res = applyPatch("a a a", {
+      path: "x.md",
+      find: "a",
+      replace: "b",
+      reason: "bulk",
+      replaceAll: true
+    });
+    expect(res.updatedContent).toBe("b b b");
+    expect(res.occurrences).toBe(3);
+  });
 });
 
 describe("buildRollbackPatch", () => {
