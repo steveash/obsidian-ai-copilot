@@ -14,9 +14,14 @@ export class OpenAIClient implements LLMClient {
   constructor(private readonly settings: AICopilotSettings) {}
 
   async chat(prompt: string, system = "You are a helpful note assistant."): Promise<string> {
+    if (!this.settings.allowRemoteModels) {
+      throw new Error("Remote model calls are disabled in settings");
+    }
     if (!this.settings.openaiApiKey) {
       throw new Error("OpenAI API key missing in plugin settings");
     }
+
+    const boundedPrompt = prompt.slice(0, this.settings.maxPromptChars);
 
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
@@ -29,7 +34,7 @@ export class OpenAIClient implements LLMClient {
         temperature: 0.2,
         messages: [
           { role: "system", content: system },
-          { role: "user", content: prompt }
+          { role: "user", content: boundedPrompt }
         ]
       })
     });
@@ -48,6 +53,6 @@ export class OpenAIClient implements LLMClient {
 }
 
 export function buildClient(settings: AICopilotSettings): LLMClient {
-  if (settings.provider === "openai") return new OpenAIClient(settings);
+  if (settings.provider === "openai" && settings.allowRemoteModels) return new OpenAIClient(settings);
   return new DryRunClient();
 }

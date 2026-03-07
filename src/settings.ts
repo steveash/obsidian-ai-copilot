@@ -22,6 +22,10 @@ export interface AICopilotSettings {
   rerankerTopK: number;
   rerankerType: "openai" | "heuristic";
   rerankerModel: string;
+  allowRemoteModels: boolean;
+  redactSensitiveLogs: boolean;
+  maxPromptChars: number;
+  strictConfigValidation: boolean;
 }
 
 export const DEFAULT_SETTINGS: AICopilotSettings = {
@@ -43,7 +47,11 @@ export const DEFAULT_SETTINGS: AICopilotSettings = {
   rerankerEnabled: true,
   rerankerTopK: 8,
   rerankerType: "openai",
-  rerankerModel: "gpt-4.1-mini"
+  rerankerModel: "gpt-4.1-mini",
+  allowRemoteModels: true,
+  redactSensitiveLogs: true,
+  maxPromptChars: 20000,
+  strictConfigValidation: true
 };
 
 function parseProvider(value: string): AICopilotSettings["provider"] {
@@ -53,6 +61,7 @@ function parseProvider(value: string): AICopilotSettings["provider"] {
 function parseRerankerType(value: string): AICopilotSettings["rerankerType"] {
   return value === "openai" ? "openai" : "heuristic";
 }
+
 
 export class AICopilotSettingTab extends PluginSettingTab {
   plugin: AICopilotPlugin;
@@ -305,6 +314,51 @@ export class AICopilotSettingTab extends PluginSettingTab {
       .addText((t) =>
         t.setValue(this.plugin.settings.rerankerModel).onChange(async (value) => {
           this.plugin.settings.rerankerModel = value.trim() || "gpt-4.1-mini";
+          await this.plugin.saveSettings();
+        })
+      );
+
+    containerEl.createEl("h3", { text: "Security + Validation" });
+
+    new Setting(containerEl)
+      .setName("Allow remote models")
+      .setDesc("Disable to force local/dry-run behavior only")
+      .addToggle((tg) =>
+        tg.setValue(this.plugin.settings.allowRemoteModels).onChange(async (value) => {
+          this.plugin.settings.allowRemoteModels = value;
+          await this.plugin.saveSettings();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Redact sensitive logs")
+      .setDesc("Mask API keys and likely secrets in plugin output files")
+      .addToggle((tg) =>
+        tg.setValue(this.plugin.settings.redactSensitiveLogs).onChange(async (value) => {
+          this.plugin.settings.redactSensitiveLogs = value;
+          await this.plugin.saveSettings();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Max prompt chars")
+      .setDesc("Hard cap on prompt size sent to model APIs")
+      .addText((t) =>
+        t.setValue(String(this.plugin.settings.maxPromptChars)).onChange(async (value) => {
+          const n = Number(value);
+          if (Number.isFinite(n)) {
+            this.plugin.settings.maxPromptChars = Math.max(2000, Math.floor(n));
+            await this.plugin.saveSettings();
+          }
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Strict config validation")
+      .setDesc("Warn on invalid config and block unsafe remote calls")
+      .addToggle((tg) =>
+        tg.setValue(this.plugin.settings.strictConfigValidation).onChange(async (value) => {
+          this.plugin.settings.strictConfigValidation = value;
           await this.plugin.saveSettings();
         })
       );
