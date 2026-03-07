@@ -26,6 +26,28 @@ describe("retrieval metadata constraints + boosts", () => {
     expect(q.terms).toContain("launch");
   });
 
+  it("supports quoted values and safer syntax", () => {
+    const q = parseQueryConstraints('folder:"Projects/AI Notes" tag:"release/v1" link:"planning board"');
+    expect(q.folder).toBe("projects/ai notes");
+    expect(q.tag).toBe("release/v1");
+    expect(q.link).toBe("planning board");
+  });
+
+  it("falls back invalid filter syntax into terms", () => {
+    const q = parseQueryConstraints("folder:../private before:not-a-date ship it");
+    expect(q.folder).toBeUndefined();
+    expect(q.before).toBeUndefined();
+    expect(q.terms).toContain("folder:../private");
+    expect(q.terms).toContain("before:not-a-date");
+    expect(q.warnings?.length).toBeGreaterThan(0);
+  });
+
+  it("drops contradictory date ranges", () => {
+    const q = parseQueryConstraints("after:2026-03-03 before:2026-03-01");
+    expect(q.after).toBeUndefined();
+    expect(q.before).toBeUndefined();
+  });
+
   it("filters docs using constraints", () => {
     const q = parseQueryConstraints("folder:projects tag:release before:2026-04-01");
     expect(passesQueryConstraints(doc, metadata, q)).toBe(true);

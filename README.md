@@ -34,11 +34,14 @@ Obsidian plugin for vault-aware AI workflows:
   - `tag:release` filter/boost by tags
   - `link:Roadmap` filter/boost by backlinks/wikilinks
   - `after:2026-01-01` / `before:2026-12-31` date filters
+  - quoted filter values are supported (example: `folder:"Projects/AI Notes" link:"release board"`)
+  - invalid filter syntax safely falls back to plain query terms instead of hard-failing retrieval
 
 ### Refinement/logging
 - scheduled refinement loop
 - TODO extraction and duplicate-title detection helpers
 - structured patch workflow (preview/apply/rollback) for safe note updates
+- patch preview now supports multi-edit patch plans with validation and per-edit summary samples
 - safe append-only logs:
   - `AI Copilot/Chat Output.md`
   - `AI Copilot/Refinement Log.md`
@@ -99,6 +102,17 @@ In Obsidian plugin settings (**AI Copilot Settings**):
 If no key is configured, set provider to `none` for dry-run/local behavior.
 
 ---
+
+## Internal architecture (for contributors)
+
+Core runtime orchestration is split into dedicated modules:
+- `src/chat-orchestrator.ts` — chat panel + query/active-note chat flow
+- `src/retrieval-orchestrator.ts` — retrieval scoring/reranking/merge pipeline
+- `src/indexing-orchestrator.ts` — vector index lifecycle + vault sync queue/events
+- `src/command-registration.ts` — plugin command wiring + refinement flow wiring
+- `src/patch-plan.ts` — structured patch plan validation/preview/apply/rollback
+
+`src/main.ts` now focuses on plugin bootstrap and dependency composition.
 
 ## Development loop
 

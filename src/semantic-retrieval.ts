@@ -27,7 +27,10 @@ export interface RetrievalQueryConstraints {
   before?: number;
   after?: number;
   terms: string[];
+  warnings?: string[];
 }
+
+const FILTER_KEYS = new Set(["folder", "tag", "link", "before", "after"]);
 
 export function tokenize(text: string): string[] {
   return text
@@ -37,38 +40,137 @@ export function tokenize(text: string): string[] {
     .filter((t) => t.length > 1);
 }
 
-export function parseQueryConstraints(query: string): RetrievalQueryConstraints {
-  const parts = query.split(/\s+/).filter(Boolean);
-  const terms: string[] = [];
-  const out: RetrievalQueryConstraints = { terms };
+function tokenizeQueryPreservingQuotes(query: string): string[] {
+  const out: string[] = [];
+  let i = 0;
+  while (i < query.length) {
+    while (i < query.length && /\s/.test(query[i])) i += 1;
+    if (i >= query.length) break;
 
-  for (const part of parts) {
-    const lower = part.toLowerCase();
-    if (lower.startsWith("folder:")) {
-      out.folder = lower.slice("folder:".length).replace(/^\/+/, "");
+    let token = "";
+    while (i < query.length && !/\s/.test(query[i])) {
+      if ((query[i] === '"' || query[i] === "'") && token.endsWith(":")) {
+        const quote = query[i++];
+        while (i < query.length && query[i] !== quote) {
+          if (query[i] === "\\" && i + 1 < query.length) {
+            token += query[i + 1];
+            i += 2;
+            continue;
+          }
+          token += query[i++];
+        }
+        if (query[i] === quote) i += 1;
+        continue;
+      }
+      token += query[i++];
+    }
+
+    if (token) out.push(token);
+  }
+  return out;
+}
+
+function normalizeFolder(folder: string): string | null {
+  const cleaned = folder.trim().replace(/^\.?\/+/, "").replace(/\\/g, "/").replace(/\/+/g, "/");
+  if (!cleaned || cleaned.includes("..")) return null;
+  return cleaned.toLowerCase();
+}
+
+function normalizeTag(tag: string): string | null {
+  const cleaned = tag.trim().replace(/^#/, "").toLowerCase();
+  if (!cleaned || !/^[a-z0-9_\/-]+$/.test(cleaned)) return null;
+  return cleaned;
+}
+
+function normalizeLink(link: string): string | null {
+  const cleaned = link.trim().replace(/\.md$/i, "").replace(/^\[\[|\]\]$/g, "");
+  if (!cleaned || cleaned.includes("\n")) return null;
+  return cleaned;
+}
+
+function parseDateMs(input: string): number | null {
+  const ts = Date.parse(input.trim());
+  return Number.isFinite(ts) ? ts : null;
+}
+
+export function parseQueryConstraints(query: string): RetrievalQueryConstraints {
+  const terms: string[] = [];
+  const warnings: string[] = [];
+  const out: RetrievalQueryConstraints = { terms, warnings };
+
+  const tokens = tokenizeQueryPreservingQuotes(query);
+  for (const token of tokens) {
+    const sepIdx = token.indexOf(":");
+    if (sepIdx <= 0) {
+      terms.push(token);
       continue;
     }
-    if (lower.startsWith("tag:")) {
-      out.tag = lower.slice("tag:".length).replace(/^#/, "");
+
+    const key = token.slice(0, sepIdx).toLowerCase();
+    const rawValue = token.slice(sepIdx + 1).trim();
+    if (!FILTER_KEYS.has(key) || !rawValue) {
+      terms.push(token);
       continue;
     }
-    if (lower.startsWith("link:")) {
-      out.link = part.slice("link:".length).replace(/\.md$/i, "");
+
+    if (key === "folder") {
+      const value = normalizeFolder(rawValue);
+      if (value) out.folder = value;
+      else {
+        warnings.push(`Invalid folder filter: ${rawValue}`);
+        terms.push(token);
+      }
       continue;
     }
-    if (lower.startsWith("before:")) {
-      const ts = Date.parse(part.slice("before:".length));
-      if (Number.isFinite(ts)) out.before = ts;
+
+    if (key === "tag") {
+      const value = normalizeTag(rawValue);
+      if (value) out.tag = value;
+      else {
+        warnings.push(`Invalid tag filter: ${rawValue}`);
+        terms.push(token);
+      }
       continue;
     }
-    if (lower.startsWith("after:")) {
-      const ts = Date.parse(part.slice("after:".length));
-      if (Number.isFinite(ts)) out.after = ts;
+
+    if (key === "link") {
+      const value = normalizeLink(rawValue);
+      if (value) out.link = value;
+      else {
+        warnings.push(`Invalid link filter: ${rawValue}`);
+        terms.push(token);
+      }
       continue;
     }
-    terms.push(part);
+
+    if (key === "before") {
+      const value = parseDateMs(rawValue);
+      if (value !== null) out.before = value;
+      else {
+        warnings.push(`Invalid before date: ${rawValue}`);
+        terms.push(token);
+      }
+      continue;
+    }
+
+    if (key === "after") {
+      const value = parseDateMs(rawValue);
+      if (value !== null) out.after = value;
+      else {
+        warnings.push(`Invalid after date: ${rawValue}`);
+        terms.push(token);
+      }
+      continue;
+    }
   }
 
+  if (out.before && out.after && out.before < out.after) {
+    warnings.push("before date is earlier than after date; date filters ignored");
+    delete out.before;
+    delete out.after;
+  }
+
+  if (!out.warnings?.length) delete out.warnings;
   return out;
 }
 
