@@ -912,6 +912,29 @@ ${(/* @__PURE__ */ new Date()).toISOString()}
     const files = this.app.vault.getMarkdownFiles().filter((f) => f.stat.mtime >= cutoff);
     return Promise.all(files.map(async (f) => ({ path: f.path, content: await this.app.vault.read(f) })));
   }
+  mergeChunkResultsToFullNotes(results) {
+    const grouped = /* @__PURE__ */ new Map();
+    for (const r of results) {
+      const arr = grouped.get(r.path) ?? [];
+      arr.push(r);
+      grouped.set(r.path, arr);
+    }
+    const merged = [];
+    for (const [path, chunks] of grouped.entries()) {
+      const top = [...chunks].sort((a, b) => b.score - a.score)[0];
+      const sectionContext = chunks.sort((a, b) => b.score - a.score).slice(0, 2).map((c, i) => `## Relevant Section ${i + 1}
+${c.content}`).join("\n\n");
+      const fullNote = chunks[0].metadata?.fullContent ?? chunks[0].content;
+      merged.push({
+        ...top,
+        content: `${sectionContext}
+
+## Full Note (${path})
+${fullNote}`
+      });
+    }
+    return merged.sort((a, b) => b.score - a.score);
+  }
   async getRelevantNotes(query, maxResults) {
     const notes = await this.getAllNotes();
     const queryTerms = tokenize(query);
@@ -953,7 +976,7 @@ ${ch.text}`,
           semanticScore: sem,
           freshnessScore: c.fresh,
           graphBoost: 0,
-          metadata: extractMetadata(c.n.content)
+          metadata: { ...extractMetadata(c.n.content), fullContent: c.n.content }
         });
       }
     }
@@ -981,6 +1004,6 @@ ${x.content}`, x]));
     } else {
       final = final.slice(0, maxResults);
     }
-    return final;
+    return this.mergeChunkResultsToFullNotes(final).slice(0, maxResults);
   }
 };
