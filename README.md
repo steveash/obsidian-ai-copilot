@@ -16,6 +16,9 @@ Obsidian plugin for vault-aware AI workflows:
 - **AI Copilot: Chat using vault query**
 - **AI Copilot: Rebuild persistent vector index**
 - **AI Copilot: Run refinement now**
+- **AI Copilot: Preview structured refinement patch**
+- **AI Copilot: Roll back last refinement patch**
+- **AI Copilot: Show indexing queue status**
 
 ### Retrieval pipeline
 - lexical preselect over vault notes
@@ -26,14 +29,25 @@ Obsidian plugin for vault-aware AI workflows:
 - merged retrieval context returns:
   1) top relevant section snippets
   2) full source note body
+- metadata-aware query controls:
+  - `folder:projects` limit by path prefix
+  - `tag:release` filter/boost by tags
+  - `link:Roadmap` filter/boost by backlinks/wikilinks
+  - `after:2026-01-01` / `before:2026-12-31` date filters
 
 ### Refinement/logging
 - scheduled refinement loop
 - TODO extraction and duplicate-title detection helpers
+- structured patch workflow (preview/apply/rollback) for safe note updates
 - safe append-only logs:
   - `AI Copilot/Chat Output.md`
   - `AI Copilot/Refinement Log.md`
-- sensitive-value redaction before log writes
+- configurable sensitive-value redaction before log writes
+
+### Chat panel UX
+- persistent right-panel chat
+- assistant responses include source citations
+- click citations to navigate directly to source notes
 
 ---
 
@@ -127,10 +141,18 @@ Create distributable artifacts:
 npm run release:bundle
 ```
 
+For a full release-quality gate (tests + build + typecheck + dist bundle):
+
+```bash
+npm run release:check
+```
+
 Output is written to `dist/`:
 - `manifest.json`
 - `main.js`
 - `styles.css`
 - `versions.json`
+
+Track user-facing changes in `CHANGELOG.md`.
 
 Use these files for manual installs or release uploads.

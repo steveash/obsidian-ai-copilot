@@ -38,9 +38,13 @@ var OpenAIClient = class {
     this.settings = settings;
   }
   async chat(prompt, system = "You are a helpful note assistant.") {
+    if (!this.settings.allowRemoteModels) {
+      throw new Error("Remote model calls are disabled in settings");
+    }
     if (!this.settings.openaiApiKey) {
       throw new Error("OpenAI API key missing in plugin settings");
     }
+    const boundedPrompt = prompt.slice(0, this.settings.maxPromptChars);
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -52,7 +56,7 @@ var OpenAIClient = class {
         temperature: 0.2,
         messages: [
           { role: "system", content: system },
-          { role: "user", content: prompt }
+          { role: "user", content: boundedPrompt }
         ]
       })
     });
@@ -65,7 +69,7 @@ var OpenAIClient = class {
   }
 };
 function buildClient(settings) {
-  if (settings.provider === "openai") return new OpenAIClient(settings);
+  if (settings.provider === "openai" && settings.allowRemoteModels) return new OpenAIClient(settings);
   return new DryRunClient();
 }
 
@@ -78,7 +82,6 @@ var AICopilotChatView = class extends import_obsidian.ItemView {
     this.appRef = appRef;
     this.messages = [];
     this.onSubmit = null;
-    void appRef;
   }
   getViewType() {
     return AI_COPILOT_VIEW;
@@ -92,15 +95,39 @@ var AICopilotChatView = class extends import_obsidian.ItemView {
   async onOpen() {
     this.render();
   }
+  async openCitation(path) {
+    const file = this.appRef.vault.getAbstractFileByPath(path);
+    if (file && "path" in file) {
+      await this.appRef.workspace.getLeaf(true).openFile(file);
+      return;
+    }
+    new import_obsidian.Notice(`AI Copilot: source not found (${path})`);
+  }
   render() {
     const root = this.containerEl.children[1];
     root.empty();
     root.createEl("h3", { text: "AI Copilot Chat" });
     const list = root.createDiv({ cls: "ai-copilot-chat-list" });
+    list.style.maxHeight = "65vh";
+    list.style.overflowY = "auto";
     for (const msg of this.messages) {
       const item = list.createDiv({ cls: `ai-copilot-msg ai-copilot-${msg.role}` });
       item.createEl("strong", { text: `${msg.role}: ` });
       item.appendText(msg.text);
+      if (msg.role === "assistant" && msg.citations?.length) {
+        const sourceBox = item.createDiv({ cls: "ai-copilot-citations" });
+        sourceBox.createEl("div", { text: "Sources:", cls: "ai-copilot-citation-title" });
+        const ul = sourceBox.createEl("ul");
+        for (const citation of msg.citations) {
+          const li = ul.createEl("li");
+          const scoreText = typeof citation.score === "number" ? ` (${citation.score.toFixed(2)})` : "";
+          const link = li.createEl("a", { text: `${citation.path}${scoreText}`, href: "#" });
+          link.onclick = (e) => {
+            e.preventDefault();
+            void this.openCitation(citation.path);
+          };
+        }
+      }
     }
     const form = root.createEl("form");
     const input = form.createEl("input", { type: "text", placeholder: "Ask about your notes..." });
@@ -115,7 +142,7 @@ var AICopilotChatView = class extends import_obsidian.ItemView {
       input.value = "";
       this.render();
       const reply = await this.onSubmit(q);
-      this.messages.push({ role: "assistant", text: reply });
+      this.messages.push(reply);
       this.render();
     };
   }
@@ -142,17 +169,93 @@ ${text}
 }
 
 // src/patcher.ts
+function countOccurrences(content, find) {
+  if (!find) return 0;
+  let count = 0;
+  let idx = 0;
+  while (true) {
+    idx = content.indexOf(find, idx);
+    if (idx < 0) return count;
+    count += 1;
+    idx += find.length;
+  }
+}
+function sampleAround(content, needle, radius = 50) {
+  if (!needle) return content.slice(0, radius * 2);
+  const idx = content.indexOf(needle);
+  if (idx < 0) return content.slice(0, radius * 2);
+  const start = Math.max(0, idx - radius);
+  const end = Math.min(content.length, idx + needle.length + radius);
+  return content.slice(start, end);
+}
 function applyPatch(content, patch) {
   if (!patch.find) {
-    return { path: patch.path, applied: false, reason: "empty find", updatedContent: content };
+    return { path: patch.path, applied: false, reason: "empty find", updatedContent: content, occurrences: 0 };
   }
-  if (!content.includes(patch.find)) {
-    return { path: patch.path, applied: false, reason: "find text not found", updatedContent: content };
+  const occurrences = countOccurrences(content, patch.find);
+  if (!occurrences) {
+    return {
+      path: patch.path,
+      applied: false,
+      reason: "find text not found",
+      updatedContent: content,
+      occurrences: 0
+    };
   }
   return {
     path: patch.path,
     applied: true,
-    updatedContent: content.replace(patch.find, patch.replace)
+    updatedContent: content.replace(patch.find, patch.replace),
+    occurrences
+  };
+}
+function previewPatch(content, patch) {
+  const applied = applyPatch(content, patch);
+  return {
+    path: patch.path,
+    reason: patch.reason,
+    applied: applied.applied,
+    beforeSample: sampleAround(content, patch.find),
+    afterSample: sampleAround(applied.updatedContent, patch.replace || patch.find),
+    occurrences: applied.occurrences ?? 0
+  };
+}
+function applyPatchTransaction(content, patch) {
+  const result = applyPatch(content, patch);
+  return {
+    patch,
+    original: content,
+    updated: result.updatedContent,
+    applied: result.applied,
+    rollbackPatch: result.applied ? buildRollbackPatch(content, result.updatedContent, patch.path) : null
+  };
+}
+function applyPatchSet(content, patches) {
+  let next = content;
+  const transactions = [];
+  for (const patch of patches) {
+    const tx = applyPatchTransaction(next, patch);
+    transactions.push(tx);
+    next = tx.updated;
+  }
+  return { finalContent: next, transactions };
+}
+function rollbackTransactions(content, transactions) {
+  let next = content;
+  for (const tx of [...transactions].reverse()) {
+    if (!tx.rollbackPatch) continue;
+    const rolled = applyPatch(next, tx.rollbackPatch);
+    next = rolled.updatedContent;
+  }
+  return next;
+}
+function buildRollbackPatch(original, updated, path) {
+  if (original === updated) return null;
+  return {
+    path,
+    find: updated,
+    replace: original,
+    reason: "rollback"
   };
 }
 
@@ -234,8 +337,37 @@ function toMarkdownPlan(plan) {
 }
 
 // src/semantic-retrieval.ts
-function tokenize(text) {
-  return text.toLowerCase().replace(/[^a-z0-9#\[\]\/\-\s]/g, " ").split(/\s+/).filter((t) => t.length > 1);
+function parseQueryConstraints(query) {
+  const parts = query.split(/\s+/).filter(Boolean);
+  const terms = [];
+  const out = { terms };
+  for (const part of parts) {
+    const lower = part.toLowerCase();
+    if (lower.startsWith("folder:")) {
+      out.folder = lower.slice("folder:".length).replace(/^\/+/, "");
+      continue;
+    }
+    if (lower.startsWith("tag:")) {
+      out.tag = lower.slice("tag:".length).replace(/^#/, "");
+      continue;
+    }
+    if (lower.startsWith("link:")) {
+      out.link = part.slice("link:".length).replace(/\.md$/i, "");
+      continue;
+    }
+    if (lower.startsWith("before:")) {
+      const ts = Date.parse(part.slice("before:".length));
+      if (Number.isFinite(ts)) out.before = ts;
+      continue;
+    }
+    if (lower.startsWith("after:")) {
+      const ts = Date.parse(part.slice("after:".length));
+      if (Number.isFinite(ts)) out.after = ts;
+      continue;
+    }
+    terms.push(part);
+  }
+  return out;
 }
 function cosine(a, b) {
   let s = 0;
@@ -252,15 +384,40 @@ function lexicalScore(doc, queryTerms) {
   const hay = `${doc.path}
 ${doc.content}`.toLowerCase();
   if (!queryTerms.length) return 0;
-  const matches = queryTerms.filter((t) => hay.includes(t));
+  const matches = queryTerms.filter((t) => hay.includes(t.toLowerCase()));
   const coverage = matches.length / queryTerms.length;
-  const phrase = hay.includes(queryTerms.join(" ")) ? 0.5 : 0;
+  const phrase = hay.includes(queryTerms.join(" ").toLowerCase()) ? 0.5 : 0;
   return coverage + phrase;
 }
 function freshnessScore(mtime) {
   if (!mtime) return 0;
   const ageDays = (Date.now() - mtime) / (1e3 * 60 * 60 * 24);
   return 1 / (1 + Math.max(0, ageDays));
+}
+function passesQueryConstraints(doc, metadata, q) {
+  if (q.folder && !doc.path.toLowerCase().startsWith(q.folder.toLowerCase())) return false;
+  if (q.tag && !metadata.tags.includes(q.tag.toLowerCase())) return false;
+  if (q.link) {
+    const needle = q.link.toLowerCase();
+    const has = metadata.links.some((l) => l.toLowerCase() === needle || l.toLowerCase() === `${needle}.md`);
+    if (!has) return false;
+  }
+  if (q.before && doc.mtime && doc.mtime > q.before) return false;
+  if (q.after && doc.mtime && doc.mtime < q.after) return false;
+  return true;
+}
+function metadataBoost(doc, metadata, q) {
+  let boost = 0;
+  if (q.folder && doc.path.toLowerCase().startsWith(q.folder.toLowerCase())) boost += 0.18;
+  if (q.tag && metadata.tags.includes(q.tag.toLowerCase())) boost += 0.2;
+  if (q.link) {
+    const needle = q.link.toLowerCase();
+    if (metadata.links.some((l) => l.toLowerCase() === needle || l.toLowerCase() === `${needle}.md`)) boost += 0.2;
+  }
+  if (q.terms.length && metadata.headings.some((h) => q.terms.some((t) => h.toLowerCase().includes(t.toLowerCase())))) {
+    boost += 0.08;
+  }
+  return boost;
 }
 function applyGraphBoost(results, maxResults, hops) {
   if (hops <= 0) return results;
@@ -587,6 +744,48 @@ async function removeIndexedNote(index, path) {
   await index.removePath(path);
 }
 
+// src/indexing-queue.ts
+var BackgroundIndexingQueue = class {
+  constructor() {
+    this.queue = [];
+    this.running = false;
+    this.processed = 0;
+    this.failed = 0;
+  }
+  enqueue(job) {
+    this.queue.push(job);
+    void this.drain();
+  }
+  async drain() {
+    if (this.running) return;
+    this.running = true;
+    while (this.queue.length) {
+      const job = this.queue.shift();
+      if (!job) break;
+      try {
+        await job();
+        this.processed += 1;
+      } catch (err) {
+        this.failed += 1;
+        this.lastError = err instanceof Error ? err.message : String(err);
+      } finally {
+        this.lastRunAt = Date.now();
+      }
+    }
+    this.running = false;
+  }
+  stats() {
+    return {
+      pending: this.queue.length,
+      running: this.running,
+      processed: this.processed,
+      failed: this.failed,
+      lastError: this.lastError,
+      lastRunAt: this.lastRunAt
+    };
+  }
+};
+
 // src/safety.ts
 var API_KEY_PATTERNS = [
   /sk-[A-Za-z0-9]{20,}/g,
@@ -621,7 +820,11 @@ var DEFAULT_SETTINGS = {
   rerankerEnabled: true,
   rerankerTopK: 8,
   rerankerType: "openai",
-  rerankerModel: "gpt-4.1-mini"
+  rerankerModel: "gpt-4.1-mini",
+  allowRemoteModels: true,
+  redactSensitiveLogs: true,
+  maxPromptChars: 2e4,
+  strictConfigValidation: true
 };
 function parseProvider(value) {
   return value === "openai" ? "openai" : "none";
@@ -755,8 +958,49 @@ var AICopilotSettingTab = class extends import_obsidian2.PluginSettingTab {
         await this.plugin.saveSettings();
       })
     );
+    containerEl.createEl("h3", { text: "Security + Validation" });
+    new import_obsidian2.Setting(containerEl).setName("Allow remote models").setDesc("Disable to force local/dry-run behavior only").addToggle(
+      (tg) => tg.setValue(this.plugin.settings.allowRemoteModels).onChange(async (value) => {
+        this.plugin.settings.allowRemoteModels = value;
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian2.Setting(containerEl).setName("Redact sensitive logs").setDesc("Mask API keys and likely secrets in plugin output files").addToggle(
+      (tg) => tg.setValue(this.plugin.settings.redactSensitiveLogs).onChange(async (value) => {
+        this.plugin.settings.redactSensitiveLogs = value;
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian2.Setting(containerEl).setName("Max prompt chars").setDesc("Hard cap on prompt size sent to model APIs").addText(
+      (t) => t.setValue(String(this.plugin.settings.maxPromptChars)).onChange(async (value) => {
+        const n = Number(value);
+        if (Number.isFinite(n)) {
+          this.plugin.settings.maxPromptChars = Math.max(2e3, Math.floor(n));
+          await this.plugin.saveSettings();
+        }
+      })
+    );
+    new import_obsidian2.Setting(containerEl).setName("Strict config validation").setDesc("Warn on invalid config and block unsafe remote calls").addToggle(
+      (tg) => tg.setValue(this.plugin.settings.strictConfigValidation).onChange(async (value) => {
+        this.plugin.settings.strictConfigValidation = value;
+        await this.plugin.saveSettings();
+      })
+    );
   }
 };
+
+// src/config-validation.ts
+function validateSettings(input) {
+  const issues = [];
+  if (input.provider === "openai" && !input.openaiApiKey) issues.push("OpenAI provider requires an API key.");
+  const weights = input.retrievalLexicalWeight + input.retrievalSemanticWeight + input.retrievalFreshnessWeight;
+  if (weights > 1.5) issues.push("Retrieval weight sum is too high; expected <= 1.5.");
+  if (input.maxPromptChars < 2e3 || input.maxPromptChars > 1e5) {
+    issues.push("maxPromptChars must be between 2000 and 100000.");
+  }
+  if (input.rerankerTopK < 1) issues.push("rerankerTopK must be >= 1.");
+  return issues;
+}
 
 // src/main.ts
 var AICopilotPlugin = class extends import_obsidian3.Plugin {
@@ -765,10 +1009,17 @@ var AICopilotPlugin = class extends import_obsidian3.Plugin {
     this.settings = DEFAULT_SETTINGS;
     this.intervalId = null;
     this.vectorIndex = null;
+    this.lastPatchTransactions = [];
+    this.lastPatchTargetPath = null;
+    this.indexingQueue = new BackgroundIndexingQueue();
   }
   async onload() {
     await this.loadSettings();
     this.addSettingTab(new AICopilotSettingTab(this.app, this));
+    if (this.settings.strictConfigValidation) {
+      const issues = validateSettings(this.settings);
+      if (issues.length) new import_obsidian3.Notice(`AI Copilot settings warnings: ${issues.join(" | ")}`);
+    }
     this.initializeVectorIndex();
     this.registerView(AI_COPILOT_VIEW, (leaf) => new AICopilotChatView(leaf, this.app));
     this.addCommand({
@@ -846,26 +1097,96 @@ ${n.content}`,
       name: "AI Copilot: Run refinement now",
       callback: async () => void this.runRefinementPass()
     });
+    this.addCommand({
+      id: "ai-copilot-preview-refinement-patch",
+      name: "AI Copilot: Preview structured refinement patch",
+      callback: async () => {
+        const file = this.app.workspace.getActiveFile();
+        if (!file) return void new import_obsidian3.Notice("No active note selected.");
+        const content = await this.app.vault.read(file);
+        const patch = {
+          path: file.path,
+          find: "  ",
+          replace: " ",
+          reason: "normalize spacing"
+        };
+        const preview = previewPatch(content, patch);
+        if (!preview.applied) return void new import_obsidian3.Notice("No matching patch candidates.");
+        await this.writeAssistantOutput(
+          "Refinement Log",
+          `## Patch Preview
+Path: ${preview.path}
+Reason: ${preview.reason}
+Occurrences: ${preview.occurrences}
+
+### Before
+${preview.beforeSample}
+
+### After
+${preview.afterSample}`
+        );
+        new import_obsidian3.Notice(`AI Copilot: patch preview logged (${preview.occurrences} matches).`);
+      }
+    });
+    this.addCommand({
+      id: "ai-copilot-rollback-last-refinement-patch",
+      name: "AI Copilot: Roll back last refinement patch",
+      callback: async () => {
+        if (!this.lastPatchTransactions.length || !this.lastPatchTargetPath) {
+          return void new import_obsidian3.Notice("No patch transaction available for rollback.");
+        }
+        const file = this.app.vault.getAbstractFileByPath(this.lastPatchTargetPath);
+        if (!(file instanceof import_obsidian3.TFile)) return void new import_obsidian3.Notice("Original note not found for rollback.");
+        const current = await this.app.vault.read(file);
+        const rolled = rollbackTransactions(current, this.lastPatchTransactions);
+        await this.app.vault.modify(file, rolled);
+        this.lastPatchTransactions = [];
+        this.lastPatchTargetPath = null;
+        new import_obsidian3.Notice("AI Copilot: rolled back last structured patch.");
+      }
+    });
+    this.addCommand({
+      id: "ai-copilot-indexing-status",
+      name: "AI Copilot: Show indexing queue status",
+      callback: async () => {
+        const stats = this.indexingQueue.stats();
+        const summary = [
+          `pending=${stats.pending}`,
+          `running=${stats.running}`,
+          `processed=${stats.processed}`,
+          `failed=${stats.failed}`,
+          stats.lastRunAt ? `lastRun=${new Date(stats.lastRunAt).toISOString()}` : "lastRun=n/a",
+          stats.lastError ? `error=${stats.lastError}` : "error=none"
+        ].join(" \xB7 ");
+        await this.writeAssistantOutput("Refinement Log", `## Indexing Queue Diagnostics
+${summary}`);
+        new import_obsidian3.Notice(`AI Copilot indexing: ${summary}`);
+      }
+    });
     this.startRefinementLoop();
     this.registerEvent(
       this.app.vault.on("modify", async (file) => {
         if (!("path" in file) || !file.path.endsWith(".md")) return;
-        if (!this.vectorIndex) this.initializeVectorIndex();
-        const tf = file;
-        const content = await this.app.vault.read(tf);
-        await syncIndexedNote(
-          this.vectorIndex,
-          { path: tf.path, content, mtime: tf.stat.mtime },
-          this.settings.embeddingModel,
-          this.settings.retrievalChunkSize
-        );
+        this.indexingQueue.enqueue(async () => {
+          if (!this.vectorIndex) this.initializeVectorIndex();
+          const tf = file;
+          const content = await this.app.vault.read(tf);
+          await syncIndexedNote(
+            this.vectorIndex,
+            { path: tf.path, content, mtime: tf.stat.mtime },
+            this.settings.embeddingModel,
+            this.settings.retrievalChunkSize
+          );
+        });
       })
     );
     this.registerEvent(
       this.app.vault.on("delete", async (file) => {
         if (!("path" in file) || !file.path.endsWith(".md")) return;
-        if (!this.vectorIndex) this.initializeVectorIndex();
-        await removeIndexedNote(this.vectorIndex, file.path);
+        this.indexingQueue.enqueue(async () => {
+          if (!this.vectorIndex) this.initializeVectorIndex();
+          await removeIndexedNote(this.vectorIndex, file.path);
+        });
       })
     );
     new import_obsidian3.Notice("AI Copilot loaded.");
@@ -926,7 +1247,11 @@ ${query}
 
 ## Response
 ${output}`);
-        return output;
+        return {
+          role: "assistant",
+          text: output,
+          citations: related.map((n) => ({ path: n.path, score: n.score })).slice(0, 5)
+        };
       });
     }
   }
@@ -946,15 +1271,21 @@ ${prompt}`,
     const todos = candidates.flatMap((n) => extractTodos(n.content));
     if (this.settings.refinementAutoApply && candidates[0]) {
       const c = candidates[0];
-      const patched = applyPatch(c.content, {
-        path: c.path,
-        find: "  ",
-        replace: " ",
-        reason: "normalize spacing"
-      });
-      if (patched.applied) {
+      const { finalContent, transactions } = applyPatchSet(c.content, [
+        {
+          path: c.path,
+          find: "  ",
+          replace: " ",
+          reason: "normalize spacing"
+        }
+      ]);
+      if (transactions.some((tx) => tx.applied)) {
         const file = this.app.vault.getAbstractFileByPath(c.path);
-        if (file instanceof import_obsidian3.TFile) await this.app.vault.modify(file, patched.updatedContent);
+        if (file instanceof import_obsidian3.TFile) {
+          await this.app.vault.modify(file, finalContent);
+          this.lastPatchTransactions = transactions;
+          this.lastPatchTargetPath = c.path;
+        }
       }
     }
     new import_obsidian3.Notice(`AI Copilot: scanned ${candidates.length} notes \xB7 TODOs ${todos.length}`);
@@ -971,7 +1302,8 @@ ${output}`);
 ---
 ${(/* @__PURE__ */ new Date()).toISOString()}
 `;
-    await this.app.vault.append(file, `${stamp}${redactSensitive(body)}
+    const out = this.settings.redactSensitiveLogs ? redactSensitive(body) : body;
+    await this.app.vault.append(file, `${stamp}${out}
 `);
   }
   async ensurePluginFile(name, initial) {
@@ -991,12 +1323,17 @@ ${(/* @__PURE__ */ new Date()).toISOString()}
   }
   async getRelevantNotes(query, maxResults) {
     const notes = await this.getAllNotes();
-    const queryTerms = tokenize(query);
+    const constraints = parseQueryConstraints(query);
     const pre = notes.map((n) => {
-      const lex = lexicalScore(n, queryTerms);
+      const metadata = extractMetadata(n.content);
+      if (!passesQueryConstraints(n, metadata, constraints)) {
+        return { n, lex: 0, fresh: 0, metaBoost: 0, metadata, preScore: -1 };
+      }
+      const lex = lexicalScore(n, constraints.terms);
       const fresh = freshnessScore(n.mtime);
-      return { n, lex, fresh, preScore: lex + 0.25 * fresh };
-    }).sort((a, b) => b.preScore - a.preScore).slice(0, Math.max(maxResults, this.settings.preselectCandidateCount));
+      const metaBoost = metadataBoost(n, metadata, constraints);
+      return { n, lex, fresh, metaBoost, metadata, preScore: lex + 0.25 * fresh + metaBoost };
+    }).filter((x) => x.preScore >= 0).sort((a, b) => b.preScore - a.preScore).slice(0, Math.max(maxResults, this.settings.preselectCandidateCount));
     if (!this.vectorIndex) this.initializeVectorIndex();
     const queryVec = await this.vectorIndex.getOrCreate(
       "__query__",
@@ -1017,7 +1354,7 @@ ${(/* @__PURE__ */ new Date()).toISOString()}
           c.n.mtime
         );
         const sem = cosine(docVec, queryVec);
-        const score = this.settings.retrievalLexicalWeight * c.lex + this.settings.retrievalSemanticWeight * sem + this.settings.retrievalFreshnessWeight * c.fresh;
+        const score = this.settings.retrievalLexicalWeight * c.lex + this.settings.retrievalSemanticWeight * sem + this.settings.retrievalFreshnessWeight * c.fresh + c.metaBoost;
         ranked.push({
           path: c.n.path,
           content: formatChunkPreview(ch.heading, ch.text),
@@ -1026,8 +1363,8 @@ ${(/* @__PURE__ */ new Date()).toISOString()}
           lexicalScore: c.lex,
           semanticScore: sem,
           freshnessScore: c.fresh,
-          graphBoost: 0,
-          metadata: { ...extractMetadata(c.n.content), fullContent: c.n.content }
+          graphBoost: c.metaBoost,
+          metadata: { ...c.metadata, fullContent: c.n.content }
         });
       }
     }
