@@ -1,124 +1,136 @@
 # Obsidian AI Copilot
 
-Obsidian plugin scaffold for an AI assistant focused on:
+Obsidian plugin for vault-aware AI workflows:
+- chat over notes
+- scheduled refinement passes
+- hybrid lexical + semantic retrieval with persistent vectors
+- retrieval context that includes **relevant sections and full note content**
 
-- Chat over your vault notes
-- Scheduled note refinement
-- TODO extraction and duplicate-note detection
+---
 
-## Implemented
+## Current capabilities
 
-- Plugin entry + commands:
-  - **AI Copilot: Chat about active note**
-  - **AI Copilot: Chat using vault query**
-  - **AI Copilot: Run refinement now**
-- Settings tab:
-  - Provider selection (`none` dry-run or `openai`)
-  - OpenAI API key + model
-  - Chat note result limit
-  - Refinement interval + lookback window
-  - Web-enrichment toggle
-- Retrieval/ranking engine for relevant notes (`src/search.ts`)
-- Refinement planner:
-  - TODO extraction
-  - Duplicate-title clusters
-  - Action suggestions
-- Structured output logs written into vault:
+### Commands
+- **AI Copilot: Open chat panel**
+- **AI Copilot: Chat about active note**
+- **AI Copilot: Chat using vault query**
+- **AI Copilot: Rebuild persistent vector index**
+- **AI Copilot: Run refinement now**
+
+### Retrieval pipeline
+- lexical preselect over vault notes
+- heading-based chunking for semantic ranking
+- persistent vector cache in `AI Copilot/.index/vectors.json`
+- freshness and wikilink graph boost
+- optional reranker (`openai` or `heuristic` fallback)
+- merged retrieval context returns:
+  1) top relevant section snippets
+  2) full source note body
+
+### Refinement/logging
+- scheduled refinement loop
+- TODO extraction and duplicate-title detection helpers
+- safe append-only logs:
   - `AI Copilot/Chat Output.md`
   - `AI Copilot/Refinement Log.md`
-- Sensitive data redaction before writing assistant output (`src/safety.ts`)
+- sensitive-value redaction before log writes
 
-## Quality
+---
 
-- Unit tests (Vitest): ranking, refinement prompt, planner, safety redaction
-- CI workflow runs `npm test` + `npm run build` on pushes/PRs
+## Local Obsidian bootstrap (clean setup)
 
-## Local development
+### 1) Clone and install dependencies
 
 ```bash
+git clone https://github.com/steveash/obsidian-ai-copilot.git
+cd obsidian-ai-copilot
 npm install
-npm test
+```
+
+### 2) Build plugin bundle
+
+```bash
 npm run build
 ```
 
-## Next feature ideas
+### 3) Install into an Obsidian vault (development install)
 
-1. Inline diff preview + one-click apply for refinement edits.
-2. Embeddings-based semantic search (instead of keyword-only ranking).
-3. Provider abstraction for Anthropic/OpenRouter/local models.
-4. Background job status panel (last run, errors, note counts).
-5. Optional internet-enrichment connector with explicit allowlists.
+Pick your vault path and copy required plugin files into:
+`<VAULT>/.obsidian/plugins/obsidian-ai-copilot/`
 
-## Notes
+```bash
+mkdir -p "<VAULT>/.obsidian/plugins/obsidian-ai-copilot"
+cp manifest.json main.js styles.css "<VAULT>/.obsidian/plugins/obsidian-ai-copilot/"
+```
 
-Current implementation is functional but intentionally conservative:
-- Refinement writes suggestions to logs by default (safe-by-default).
-- `openai` provider requires user-configured API key in plugin settings.
+### 4) Enable plugin in Obsidian
+1. Open Obsidian → **Settings** → **Community plugins**
+2. Disable Safe Mode if needed
+3. Enable **Obsidian AI Copilot**
 
+---
 
-## Implemented features (current)
+## First-run configuration (API key + models)
 
-- Settings tab for provider/model/refinement schedule
-- Query-based note chat with ranked context
-- Dedicated AI Copilot chat panel view
-- Scheduled refinement run with plan + output logs
-- Safe deterministic auto-apply hook (spacing normalization)
-- Sensitive data redaction before writing logs
-- CI workflow (test + build)
+In Obsidian plugin settings (**AI Copilot Settings**):
 
+1. Set **Provider** to `openai`
+2. Paste **OpenAI API key**
+3. Optionally tune:
+   - OpenAI chat model (`gpt-4o-mini` default)
+   - embedding model (`text-embedding-3-large` default)
+   - reranker model (`gpt-4.1-mini` default)
+4. Run **AI Copilot: Rebuild persistent vector index** once after initial enablement (or after major vault changes)
 
-## Integration-style test coverage
+If no key is configured, set provider to `none` for dry-run/local behavior.
 
-- `tests/vault-index.test.ts` validates recent-note filtering and retrieval against an in-memory vault adapter.
-- This keeps core retrieval logic testable outside Obsidian runtime.
+---
 
-## Release packaging
+## Development loop
 
-Build release artifacts:
+Use this loop for every change:
+
+```bash
+npm test
+npm run build
+npx tsc --noEmit
+```
+
+Then copy updated `main.js` / `manifest.json` / `styles.css` into your vault plugin directory and reload Obsidian.
+
+Tip: in Obsidian, use **Reload app without saving** (Command Palette) after replacing bundle files.
+
+---
+
+## Testing coverage
+
+- unit tests for planner, refinement, chunking, reranker, safety, semantic helpers
+- vector index cache behavior tests
+- integration-style retrieval/indexing tests using in-memory storage/mocks for:
+  - event-driven note update indexing path
+  - delete-path vector cleanup
+  - merged retrieval output (sections + full note)
+
+Run all tests:
+
+```bash
+npm test
+```
+
+---
+
+## Release bundle usage
+
+Create distributable artifacts:
 
 ```bash
 npm run release:bundle
 ```
 
-This writes `manifest.json`, `main.js`, `styles.css`, and `versions.json` to `dist/`.
+Output is written to `dist/`:
+- `manifest.json`
+- `main.js`
+- `styles.css`
+- `versions.json`
 
-
-## Retrieval design notes (researched + implemented)
-
-Implemented a local **hybrid retrieval** pipeline inspired by common RAG best practices:
-
-- Lexical overlap score (BM25-style sparse signal)
-- Local embedding cosine similarity (dense-ish semantic signal)
-- Freshness boost from note `mtime`
-- Graph enrichment via `[[wikilinks]]` from top-ranked notes
-- Metadata extraction (`tags`, `headings`, `links`) for future filtering/reranking
-
-This gives better robustness for both exact-term and concept-level queries while staying fully local/private.
-
-
-## Persistent vector index (new)
-
-- Embeddings are persisted to `AI Copilot/.index/vectors.json` inside the vault.
-- Uses OpenAI embeddings endpoint by default (`text-embedding-3-large`) when provider is OpenAI.
-- Retrieval flow is now two-stage:
-  1) lexical preselect top-N
-  2) vector rerank + freshness + wikilink graph boost
-- Command added: **AI Copilot: Rebuild persistent vector index**
-
-
-## Added retrieval upgrades
-
-- Incremental vector updates on note modify/delete events
-- Chunk-level embeddings (heading-based chunks)
-- Optional reranker pass for top-k results
-
-This improves long-note retrieval quality and keeps index fresh without full rebuilds.
-
-
-## Best reranker mode
-
-- Added OpenAI LLM reranker mode (default) for higher precision ranking.
-- Configurable via settings:
-  - `rerankerType`: `openai` (default) or `heuristic`
-  - `rerankerModel`: default `gpt-4.1-mini`
-- Automatic fallback to heuristic reranker on API errors.
+Use these files for manual installs or release uploads.
