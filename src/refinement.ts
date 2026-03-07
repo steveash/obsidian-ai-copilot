@@ -18,7 +18,9 @@ export function extractTodos(markdown: string): string[] {
 export function detectDuplicateTitleClusters(notes: RefineCandidate[]): DuplicateCluster[] {
   const groups = new Map<string, string[]>();
   for (const n of notes) {
-    const base = n.path.split("/").at(-1)?.replace(/\.md$/i, "").toLowerCase() ?? n.path;
+    const parts = n.path.split("/");
+    const leaf = parts.length ? parts[parts.length - 1] : n.path;
+    const base = leaf.replace(/\.md$/i, "").toLowerCase();
     const arr = groups.get(base) ?? [];
     arr.push(n.path);
     groups.set(base, arr);

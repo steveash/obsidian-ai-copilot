@@ -15,6 +15,11 @@ export interface VectorIndexData {
   records: Record<string, StoredVector>;
 }
 
+type LegacyVectorIndexData = {
+  version?: number;
+  records?: Record<string, StoredVector>;
+};
+
 export interface VectorStorage {
   load(): Promise<VectorIndexData>;
   save(data: VectorIndexData): Promise<void>;
@@ -47,11 +52,18 @@ export class PersistentVectorIndex {
   private cache: VectorIndexData | null = null;
   constructor(private readonly storage: VectorStorage, private readonly provider: EmbeddingProvider) {}
 
+  private normalizeLoadedData(loaded: VectorIndexData | LegacyVectorIndexData): VectorIndexData {
+    if (loaded.version === 2 && loaded.records) {
+      return { version: 2, records: loaded.records };
+    }
+    return { version: 2, records: loaded.records ?? {} };
+  }
+
   private async ensureLoaded() {
     if (!this.cache) {
       const loaded = await this.storage.load();
       // migrate v1->v2 defensively
-      this.cache = loaded.version === 2 ? loaded : ({ version: 2, records: (loaded as any).records ?? {} } as VectorIndexData);
+      this.cache = this.normalizeLoadedData(loaded);
     }
   }
 
@@ -91,5 +103,11 @@ export class PersistentVectorIndex {
       if (this.cache!.records[key].path === path) delete this.cache!.records[key];
     }
     await this.storage.save(this.cache!);
+  }
+
+  async rebuild(chunks: Array<{ id: string; path: string; content: string; mtime?: number }>, model: string): Promise<number> {
+    this.cache = { version: 2, records: {} };
+    await this.storage.save(this.cache);
+    return this.indexChunks(chunks, model);
   }
 }

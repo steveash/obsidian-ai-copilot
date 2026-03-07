@@ -46,6 +46,14 @@ export const DEFAULT_SETTINGS: AICopilotSettings = {
   rerankerModel: "gpt-4.1-mini"
 };
 
+function parseProvider(value: string): AICopilotSettings["provider"] {
+  return value === "openai" ? "openai" : "none";
+}
+
+function parseRerankerType(value: string): AICopilotSettings["rerankerType"] {
+  return value === "openai" ? "openai" : "heuristic";
+}
+
 export class AICopilotSettingTab extends PluginSettingTab {
   plugin: AICopilotPlugin;
 
@@ -67,8 +75,8 @@ export class AICopilotSettingTab extends PluginSettingTab {
           .addOption("none", "None (dry-run)")
           .addOption("openai", "OpenAI")
           .setValue(this.plugin.settings.provider)
-          .onChange(async (value: "openai" | "none") => {
-            this.plugin.settings.provider = value;
+          .onChange(async (value: string) => {
+            this.plugin.settings.provider = parseProvider(value);
             await this.plugin.saveSettings();
           })
       );
@@ -285,8 +293,8 @@ export class AICopilotSettingTab extends PluginSettingTab {
           .addOption("openai", "OpenAI (best quality)")
           .addOption("heuristic", "Heuristic (local fallback)")
           .setValue(this.plugin.settings.rerankerType)
-          .onChange(async (value: "openai" | "heuristic") => {
-            this.plugin.settings.rerankerType = value;
+          .onChange(async (value: string) => {
+            this.plugin.settings.rerankerType = parseRerankerType(value);
             await this.plugin.saveSettings();
           })
       );

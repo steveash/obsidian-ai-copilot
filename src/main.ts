@@ -89,8 +89,13 @@ export default class AICopilotPlugin extends Plugin {
         const notes = await this.getAllNotes();
         if (!this.vectorIndex) this.initializeVectorIndex();
         const count = await this.vectorIndex!.rebuild(
-          notes.map((n) => ({ path: n.path, content: `${n.path}
-${n.content}` })),
+          notes.map((n) => ({
+            id: `${n.path}#full`,
+            path: n.path,
+            content: `${n.path}
+${n.content}`,
+            mtime: n.mtime
+          })),
           this.settings.embeddingModel
         );
         new Notice(`AI Copilot: rebuilt vector index for ${count} notes.`);
@@ -125,7 +130,7 @@ ${n.content}` })),
       this.app.vault.on("delete", async (file) => {
         if (!("path" in file) || !file.path.endsWith(".md")) return;
         if (!this.vectorIndex) this.initializeVectorIndex();
-        await this.vectorIndex!.removePath((file as any).path);
+        await this.vectorIndex!.removePath(file.path);
       })
     );
 
@@ -329,7 +334,7 @@ ${ch.text}`,
           semanticScore: sem,
           freshnessScore: c.fresh,
           graphBoost: 0,
-          metadata: { ...extractMetadata(c.n.content), fullContent: c.n.content } as any
+          metadata: { ...extractMetadata(c.n.content), fullContent: c.n.content }
         });
       }
     }

@@ -1,7 +1,14 @@
 import type { App, TFile } from "obsidian";
-import type { VectorIndexData, VectorStorage } from "./vector-index";
+import type { StoredVector, VectorIndexData, VectorStorage } from "./vector-index";
 
 const INDEX_PATH = "AI Copilot/.index/vectors.json";
+
+function getParsedRecords(value: unknown): Record<string, StoredVector> | null {
+  if (!value || typeof value !== "object") return null;
+  const maybe = value as { records?: unknown };
+  if (!maybe.records || typeof maybe.records !== "object") return null;
+  return maybe.records as Record<string, StoredVector>;
+}
 
 export class VaultVectorStorage implements VectorStorage {
   constructor(private readonly app: App) {}
@@ -11,9 +18,10 @@ export class VaultVectorStorage implements VectorStorage {
     if (!f) return { version: 2, records: {} };
     const text = await this.app.vault.read(f as TFile);
     try {
-      const parsed = JSON.parse(text) as any;
-      if (parsed?.records) {
-        return { version: 2, records: parsed.records };
+      const parsed: unknown = JSON.parse(text);
+      const records = getParsedRecords(parsed);
+      if (records) {
+        return { version: 2, records };
       }
       return { version: 2, records: {} };
     } catch {

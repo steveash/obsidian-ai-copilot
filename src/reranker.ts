@@ -1,5 +1,7 @@
 import type { AICopilotSettings } from "./settings";
 
+type RerankerSettings = Pick<AICopilotSettings, "rerankerType" | "openaiApiKey" | "rerankerModel">;
+
 export interface RerankCandidate {
   id: string;
   text: string;
@@ -28,7 +30,7 @@ export class HeuristicReranker implements Reranker {
 }
 
 export class OpenAIReranker implements Reranker {
-  constructor(private readonly settings: AICopilotSettings) {}
+  constructor(private readonly settings: RerankerSettings) {}
 
   async rerank(query: string, candidates: RerankCandidate[]): Promise<RerankCandidate[]> {
     if (!this.settings.openaiApiKey) throw new Error("Missing OpenAI API key");
@@ -79,7 +81,7 @@ export class OpenAIReranker implements Reranker {
   }
 }
 
-export function createReranker(settings: AICopilotSettings): Reranker {
+export function createReranker(settings: RerankerSettings): Reranker {
   if (settings.rerankerType === "openai") return new OpenAIReranker(settings);
   return new HeuristicReranker();
 }

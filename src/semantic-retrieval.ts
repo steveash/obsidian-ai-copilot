@@ -4,17 +4,20 @@ export interface NoteDoc {
   mtime?: number;
 }
 
+export interface RetrievedNoteMetadata {
+  tags: string[];
+  links: string[];
+  headings: string[];
+  fullContent?: string;
+}
+
 export interface RetrievedNote extends NoteDoc {
   score: number;
   lexicalScore: number;
   semanticScore: number;
   freshnessScore: number;
   graphBoost: number;
-  metadata: {
-    tags: string[];
-    links: string[];
-    headings: string[];
-  };
+  metadata: RetrievedNoteMetadata;
 }
 
 export function tokenize(text: string): string[] {

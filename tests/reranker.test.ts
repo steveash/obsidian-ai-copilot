@@ -12,7 +12,7 @@ describe("HeuristicReranker", () => {
   });
 
   it("factory picks heuristic", () => {
-    const r = createReranker({ rerankerType: "heuristic" } as any);
+    const r = createReranker({ rerankerType: "heuristic", openaiApiKey: "", rerankerModel: "gpt-4.1-mini" });
     expect(r).toBeInstanceOf(HeuristicReranker);
   });
 });
