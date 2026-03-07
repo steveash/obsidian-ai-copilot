@@ -18,3 +18,15 @@
 .ai-copilot-assistant {
   background: var(--background-secondary);
 }
+
+.ai-copilot-citations {
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--background-modifier-border);
+  font-size: 12px;
+}
+
+.ai-copilot-citation-title {
+  opacity: 0.75;
+  margin-bottom: 2px;
+}
