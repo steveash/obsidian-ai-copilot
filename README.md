@@ -41,7 +41,7 @@ Obsidian plugin for vault-aware AI workflows:
 - scheduled refinement loop
 - TODO extraction and duplicate-title detection helpers
 - structured patch workflow (preview/apply/rollback) for safe note updates
-- patch preview now supports multi-edit patch plans with validation and per-edit summary samples
+- patch preview now supports multi-edit patch plans with validation, per-edit status, and replace-all edit support
 - safe append-only logs:
   - `AI Copilot/Chat Output.md`
   - `AI Copilot/Refinement Log.md`

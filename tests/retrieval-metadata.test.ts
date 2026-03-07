@@ -42,6 +42,19 @@ describe("retrieval metadata constraints + boosts", () => {
     expect(q.warnings?.length).toBeGreaterThan(0);
   });
 
+  it("keeps unknown filters as plain terms", () => {
+    const q = parseQueryConstraints("owner:me project status:active");
+    expect(q.terms).toContain("owner:me");
+    expect(q.terms).toContain("status:active");
+    expect(q.warnings).toBeUndefined();
+  });
+
+  it("supports single-quoted values", () => {
+    const q = parseQueryConstraints("folder:'Projects/Alpha Team' tag:'#release'");
+    expect(q.folder).toBe("projects/alpha team");
+    expect(q.tag).toBe("release");
+  });
+
   it("drops contradictory date ranges", () => {
     const q = parseQueryConstraints("after:2026-03-03 before:2026-03-01");
     expect(q.after).toBeUndefined();
