@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { HeuristicReranker } from "../src/reranker";
+import { HeuristicReranker, createReranker } from "../src/reranker";
 
 describe("HeuristicReranker", () => {
   it("reorders based on query term hits", async () => {
@@ -9,5 +9,10 @@ describe("HeuristicReranker", () => {
       { id: "2", text: "obsidian plugin architecture", score: 1 }
     ]);
     expect(out[0].id).toBe("2");
+  });
+
+  it("factory picks heuristic", () => {
+    const r = createReranker({ rerankerType: "heuristic" } as any);
+    expect(r).toBeInstanceOf(HeuristicReranker);
   });
 });

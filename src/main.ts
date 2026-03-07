@@ -17,7 +17,7 @@ import { PersistentVectorIndex } from "./vector-index";
 import { OpenAIEmbeddingProvider, FallbackHashEmbeddingProvider } from "./embedding-provider";
 import { VaultVectorStorage } from "./vault-vector-storage";
 import { chunkMarkdownByHeading } from "./chunker";
-import { HeuristicReranker } from "./reranker";
+import { createReranker, HeuristicReranker } from "./reranker";
 import { redactSensitive } from "./safety";
 import { AICopilotSettingTab, DEFAULT_SETTINGS, type AICopilotSettings } from "./settings";
 
@@ -310,14 +310,26 @@ ${ch.text}`,
       .slice(0, Math.max(maxResults, this.settings.rerankerTopK));
 
     if (this.settings.rerankerEnabled) {
-      const reranker = new HeuristicReranker();
-      const reranked = await reranker.rerank(
-        query,
-        final.slice(0, this.settings.rerankerTopK).map((x, i) => ({ id: `${i}:${x.path}`, text: `${x.path}
-${x.content}`, score: x.score }))
-      );
-      const map = new Map(final.map((x) => [`${x.path}
-${x.content}`, x]));
+      let reranker = createReranker(this.settings);
+      let reranked;
+      try {
+        reranked = await reranker.rerank(
+          query,
+          final
+            .slice(0, this.settings.rerankerTopK)
+            .map((x, i) => ({ id: `${i}:${x.path}`, text: `${x.path}\n${x.content}`, score: x.score }))
+        );
+      } catch {
+        reranker = new HeuristicReranker();
+        reranked = await reranker.rerank(
+          query,
+          final
+            .slice(0, this.settings.rerankerTopK)
+            .map((x, i) => ({ id: `${i}:${x.path}`, text: `${x.path}\n${x.content}`, score: x.score }))
+        );
+      }
+
+      const map = new Map(final.map((x) => [`${x.path}\n${x.content}`, x]));
       final = reranked
         .map((r) => map.get(r.text))
         .filter((x): x is RetrievedNote => Boolean(x))

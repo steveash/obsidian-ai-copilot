@@ -467,6 +467,56 @@ var HeuristicReranker = class {
     }).sort((a, b) => b.score - a.score);
   }
 };
+var OpenAIReranker = class {
+  constructor(settings) {
+    this.settings = settings;
+  }
+  async rerank(query, candidates) {
+    if (!this.settings.openaiApiKey) throw new Error("Missing OpenAI API key");
+    const compact = candidates.map((c, i) => ({ idx: i, id: c.id, text: c.text.slice(0, 2500) }));
+    const prompt = [
+      "Rank candidate passages by relevance to the user query.",
+      "Return strict JSON only in this format:",
+      '{"ranked":[{"idx":number,"relevance":number}]}',
+      "Relevance must be 0..1.",
+      `Query: ${query}`,
+      `Candidates: ${JSON.stringify(compact)}`
+    ].join("\n\n");
+    const res = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${this.settings.openaiApiKey}`
+      },
+      body: JSON.stringify({
+        model: this.settings.rerankerModel || "gpt-4.1-mini",
+        temperature: 0,
+        response_format: { type: "json_object" },
+        messages: [
+          { role: "system", content: "You are a precise ranking engine." },
+          { role: "user", content: prompt }
+        ]
+      })
+    });
+    if (!res.ok) {
+      throw new Error(`OpenAI rerank failed: ${res.status} ${await res.text()}`);
+    }
+    const json = await res.json();
+    const content = json.choices?.[0]?.message?.content || "{}";
+    const parsed = JSON.parse(content);
+    const scored = [...candidates];
+    for (const r of parsed.ranked ?? []) {
+      if (r.idx >= 0 && r.idx < scored.length) {
+        scored[r.idx] = { ...scored[r.idx], score: scored[r.idx].score + Math.max(0, Math.min(1, r.relevance)) };
+      }
+    }
+    return scored.sort((a, b) => b.score - a.score);
+  }
+};
+function createReranker(settings) {
+  if (settings.rerankerType === "openai") return new OpenAIReranker(settings);
+  return new HeuristicReranker();
+}
 
 // src/safety.ts
 var API_KEY_PATTERNS = [
@@ -500,7 +550,9 @@ var DEFAULT_SETTINGS = {
   preselectCandidateCount: 40,
   retrievalChunkSize: 1200,
   rerankerEnabled: true,
-  rerankerTopK: 8
+  rerankerTopK: 8,
+  rerankerType: "openai",
+  rerankerModel: "gpt-4.1-mini"
 };
 var AICopilotSettingTab = class extends import_obsidian2.PluginSettingTab {
   constructor(app, plugin) {
@@ -613,6 +665,18 @@ var AICopilotSettingTab = class extends import_obsidian2.PluginSettingTab {
     new import_obsidian2.Setting(containerEl).setName("Reranker top-k").setDesc("How many results get reranker pass").addSlider(
       (s) => s.setLimits(3, 20, 1).setValue(this.plugin.settings.rerankerTopK).setDynamicTooltip().onChange(async (value) => {
         this.plugin.settings.rerankerTopK = value;
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian2.Setting(containerEl).setName("Reranker engine").setDesc("Best quality: OpenAI LLM reranker").addDropdown(
+      (d) => d.addOption("openai", "OpenAI (best quality)").addOption("heuristic", "Heuristic (local fallback)").setValue(this.plugin.settings.rerankerType).onChange(async (value) => {
+        this.plugin.settings.rerankerType = value;
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian2.Setting(containerEl).setName("Reranker model").setDesc("OpenAI model used for reranking").addText(
+      (t) => t.setValue(this.plugin.settings.rerankerModel).onChange(async (value) => {
+        this.plugin.settings.rerankerModel = value.trim() || "gpt-4.1-mini";
         await this.plugin.saveSettings();
       })
     );
@@ -895,12 +959,22 @@ ${ch.text}`,
     }
     let final = applyGraphBoost(ranked, Math.max(maxResults, this.settings.rerankerTopK), this.settings.retrievalGraphExpandHops).sort((a, b) => b.score - a.score).slice(0, Math.max(maxResults, this.settings.rerankerTopK));
     if (this.settings.rerankerEnabled) {
-      const reranker = new HeuristicReranker();
-      const reranked = await reranker.rerank(
-        query,
-        final.slice(0, this.settings.rerankerTopK).map((x, i) => ({ id: `${i}:${x.path}`, text: `${x.path}
+      let reranker = createReranker(this.settings);
+      let reranked;
+      try {
+        reranked = await reranker.rerank(
+          query,
+          final.slice(0, this.settings.rerankerTopK).map((x, i) => ({ id: `${i}:${x.path}`, text: `${x.path}
 ${x.content}`, score: x.score }))
-      );
+        );
+      } catch {
+        reranker = new HeuristicReranker();
+        reranked = await reranker.rerank(
+          query,
+          final.slice(0, this.settings.rerankerTopK).map((x, i) => ({ id: `${i}:${x.path}`, text: `${x.path}
+${x.content}`, score: x.score }))
+        );
+      }
       const map = new Map(final.map((x) => [`${x.path}
 ${x.content}`, x]));
       final = reranked.map((r) => map.get(r.text)).filter((x) => Boolean(x)).concat(final).slice(0, maxResults);

@@ -20,6 +20,8 @@ export interface AICopilotSettings {
   retrievalChunkSize: number;
   rerankerEnabled: boolean;
   rerankerTopK: number;
+  rerankerType: "openai" | "heuristic";
+  rerankerModel: string;
 }
 
 export const DEFAULT_SETTINGS: AICopilotSettings = {
@@ -39,7 +41,9 @@ export const DEFAULT_SETTINGS: AICopilotSettings = {
   preselectCandidateCount: 40,
   retrievalChunkSize: 1200,
   rerankerEnabled: true,
-  rerankerTopK: 8
+  rerankerTopK: 8,
+  rerankerType: "openai",
+  rerankerModel: "gpt-4.1-mini"
 };
 
 export class AICopilotSettingTab extends PluginSettingTab {
@@ -271,6 +275,30 @@ export class AICopilotSettingTab extends PluginSettingTab {
             this.plugin.settings.rerankerTopK = value;
             await this.plugin.saveSettings();
           })
+      );
+
+    new Setting(containerEl)
+      .setName("Reranker engine")
+      .setDesc("Best quality: OpenAI LLM reranker")
+      .addDropdown((d) =>
+        d
+          .addOption("openai", "OpenAI (best quality)")
+          .addOption("heuristic", "Heuristic (local fallback)")
+          .setValue(this.plugin.settings.rerankerType)
+          .onChange(async (value: "openai" | "heuristic") => {
+            this.plugin.settings.rerankerType = value;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Reranker model")
+      .setDesc("OpenAI model used for reranking")
+      .addText((t) =>
+        t.setValue(this.plugin.settings.rerankerModel).onChange(async (value) => {
+          this.plugin.settings.rerankerModel = value.trim() || "gpt-4.1-mini";
+          await this.plugin.saveSettings();
+        })
       );
   }
 }

@@ -113,3 +113,12 @@ This gives better robustness for both exact-term and concept-level queries while
 - Optional reranker pass for top-k results
 
 This improves long-note retrieval quality and keeps index fresh without full rebuilds.
+
+
+## Best reranker mode
+
+- Added OpenAI LLM reranker mode (default) for higher precision ranking.
+- Configurable via settings:
+  - `rerankerType`: `openai` (default) or `heuristic`
+  - `rerankerModel`: default `gpt-4.1-mini`
+- Automatic fallback to heuristic reranker on API errors.
