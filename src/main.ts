@@ -18,6 +18,8 @@ import { OpenAIEmbeddingProvider, FallbackHashEmbeddingProvider } from "./embedd
 import { VaultVectorStorage } from "./vault-vector-storage";
 import { chunkMarkdownByHeading } from "./chunker";
 import { createReranker, HeuristicReranker } from "./reranker";
+import { formatChunkContent, formatChunkPreview, mergeChunkResultsToFullNotes } from "./retrieval-context";
+import { removeIndexedNote, syncIndexedNote } from "./indexing-sync";
 import { redactSensitive } from "./safety";
 import { AICopilotSettingTab, DEFAULT_SETTINGS, type AICopilotSettings } from "./settings";
 
@@ -116,13 +118,12 @@ ${n.content}`,
         if (!this.vectorIndex) this.initializeVectorIndex();
         const tf = file as TFile;
         const content = await this.app.vault.read(tf);
-        const chunks = chunkMarkdownByHeading(tf.path, content, this.settings.retrievalChunkSize).map((c) => ({
-          id: c.chunkId,
-          path: c.path,
-          content: `${c.path}\n${c.heading}\n${c.text}`,
-          mtime: tf.stat.mtime
-        }));
-        await this.vectorIndex!.indexChunks(chunks, this.settings.embeddingModel);
+        await syncIndexedNote(
+          this.vectorIndex!,
+          { path: tf.path, content, mtime: tf.stat.mtime },
+          this.settings.embeddingModel,
+          this.settings.retrievalChunkSize
+        );
       })
     );
 
@@ -130,7 +131,7 @@ ${n.content}`,
       this.app.vault.on("delete", async (file) => {
         if (!("path" in file) || !file.path.endsWith(".md")) return;
         if (!this.vectorIndex) this.initializeVectorIndex();
-        await this.vectorIndex!.removePath(file.path);
+        await removeIndexedNote(this.vectorIndex!, file.path);
       })
     );
 
@@ -255,35 +256,6 @@ ${n.content}`,
     return Promise.all(files.map(async (f) => ({ path: f.path, content: await this.app.vault.read(f) })));
   }
 
-  private mergeChunkResultsToFullNotes(results: RetrievedNote[]): RetrievedNote[] {
-    const grouped = new Map<string, RetrievedNote[]>();
-    for (const r of results) {
-      const arr = grouped.get(r.path) ?? [];
-      arr.push(r);
-      grouped.set(r.path, arr);
-    }
-
-    const merged: RetrievedNote[] = [];
-    for (const [path, chunks] of grouped.entries()) {
-      const top = [...chunks].sort((a, b) => b.score - a.score)[0];
-      const sectionContext = chunks
-        .sort((a, b) => b.score - a.score)
-        .slice(0, 2)
-        .map((c, i) => `## Relevant Section ${i + 1}\n${c.content}`)
-        .join("\n\n");
-
-      // full note content is always included in retrieval output now
-      const fullNote = chunks[0].metadata?.fullContent ?? chunks[0].content;
-
-      merged.push({
-        ...top,
-        content: `${sectionContext}\n\n## Full Note (${path})\n${fullNote}`
-      });
-    }
-
-    return merged.sort((a, b) => b.score - a.score);
-  }
-
   private async getRelevantNotes(query: string, maxResults: number): Promise<RetrievedNote[]> {
     const notes = await this.getAllNotes();
     const queryTerms = tokenize(query);
@@ -309,9 +281,7 @@ ${n.content}`,
     for (const c of pre) {
       const chunks = chunkMarkdownByHeading(c.n.path, c.n.content, this.settings.retrievalChunkSize);
       for (const ch of chunks) {
-        const chunkContent = `${c.n.path}
-${ch.heading}
-${ch.text}`;
+        const chunkContent = formatChunkContent(c.n.path, ch.heading, ch.text);
         const docVec = await this.vectorIndex!.getOrCreate(
           ch.chunkId,
           c.n.path,
@@ -326,8 +296,7 @@ ${ch.text}`;
           this.settings.retrievalFreshnessWeight * c.fresh;
         ranked.push({
           path: c.n.path,
-          content: `# ${ch.heading}
-${ch.text}`,
+          content: formatChunkPreview(ch.heading, ch.text),
           mtime: c.n.mtime,
           score,
           lexicalScore: c.lex,
@@ -373,6 +342,6 @@ ${ch.text}`,
       final = final.slice(0, maxResults);
     }
 
-    return this.mergeChunkResultsToFullNotes(final).slice(0, maxResults);
+    return mergeChunkResultsToFullNotes(final).slice(0, maxResults);
   }
 }

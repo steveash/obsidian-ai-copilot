@@ -164,7 +164,9 @@ function extractTodos(markdown) {
 function detectDuplicateTitleClusters(notes) {
   const groups = /* @__PURE__ */ new Map();
   for (const n of notes) {
-    const base = n.path.split("/").at(-1)?.replace(/\.md$/i, "").toLowerCase() ?? n.path;
+    const parts = n.path.split("/");
+    const leaf = parts.length ? parts[parts.length - 1] : n.path;
+    const base = leaf.replace(/\.md$/i, "").toLowerCase();
     const arr = groups.get(base) ?? [];
     arr.push(n.path);
     groups.set(base, arr);
@@ -295,10 +297,16 @@ var PersistentVectorIndex = class {
     this.provider = provider;
     this.cache = null;
   }
+  normalizeLoadedData(loaded) {
+    if (loaded.version === 2 && loaded.records) {
+      return { version: 2, records: loaded.records };
+    }
+    return { version: 2, records: loaded.records ?? {} };
+  }
   async ensureLoaded() {
     if (!this.cache) {
       const loaded = await this.storage.load();
-      this.cache = loaded.version === 2 ? loaded : { version: 2, records: loaded.records ?? {} };
+      this.cache = this.normalizeLoadedData(loaded);
     }
   }
   async getOrCreate(id, path, content, model, mtime) {
@@ -334,6 +342,11 @@ var PersistentVectorIndex = class {
       if (this.cache.records[key].path === path) delete this.cache.records[key];
     }
     await this.storage.save(this.cache);
+  }
+  async rebuild(chunks, model) {
+    this.cache = { version: 2, records: {} };
+    await this.storage.save(this.cache);
+    return this.indexChunks(chunks, model);
   }
 };
 
@@ -373,6 +386,12 @@ var FallbackHashEmbeddingProvider = class {
 
 // src/vault-vector-storage.ts
 var INDEX_PATH = "AI Copilot/.index/vectors.json";
+function getParsedRecords(value) {
+  if (!value || typeof value !== "object") return null;
+  const maybe = value;
+  if (!maybe.records || typeof maybe.records !== "object") return null;
+  return maybe.records;
+}
 var VaultVectorStorage = class {
   constructor(app) {
     this.app = app;
@@ -383,8 +402,9 @@ var VaultVectorStorage = class {
     const text = await this.app.vault.read(f);
     try {
       const parsed = JSON.parse(text);
-      if (parsed?.records) {
-        return { version: 2, records: parsed.records };
+      const records = getParsedRecords(parsed);
+      if (records) {
+        return { version: 2, records };
       }
       return { version: 2, records: {} };
     } catch {
@@ -518,6 +538,55 @@ function createReranker(settings) {
   return new HeuristicReranker();
 }
 
+// src/retrieval-context.ts
+function formatChunkContent(path, heading, text) {
+  return [path, heading, text].join("\n");
+}
+function formatChunkPreview(heading, text) {
+  return [`# ${heading}`, text].join("\n");
+}
+function mergeChunkResultsToFullNotes(results, sectionsPerNote = 2) {
+  const grouped = /* @__PURE__ */ new Map();
+  for (const result of results) {
+    const items = grouped.get(result.path) ?? [];
+    items.push(result);
+    grouped.set(result.path, items);
+  }
+  const merged = [];
+  for (const [path, chunks] of grouped.entries()) {
+    const ranked = [...chunks].sort((a, b) => b.score - a.score);
+    const top = ranked[0];
+    const sectionContext = ranked.slice(0, sectionsPerNote).map((chunk, i) => `## Relevant Section ${i + 1}
+${chunk.content}`).join("\n\n");
+    const fullNote = top.metadata.fullContent ?? top.content;
+    merged.push({
+      ...top,
+      content: `${sectionContext}
+
+## Full Note (${path})
+${fullNote}`
+    });
+  }
+  return merged.sort((a, b) => b.score - a.score);
+}
+
+// src/indexing-sync.ts
+function toIndexedChunks(note, chunkSize) {
+  return chunkMarkdownByHeading(note.path, note.content, chunkSize).map((chunk) => ({
+    id: chunk.chunkId,
+    path: chunk.path,
+    content: formatChunkContent(chunk.path, chunk.heading, chunk.text),
+    mtime: note.mtime
+  }));
+}
+async function syncIndexedNote(index, note, model, chunkSize) {
+  const chunks = toIndexedChunks(note, chunkSize);
+  return index.indexChunks(chunks, model);
+}
+async function removeIndexedNote(index, path) {
+  await index.removePath(path);
+}
+
 // src/safety.ts
 var API_KEY_PATTERNS = [
   /sk-[A-Za-z0-9]{20,}/g,
@@ -554,6 +623,12 @@ var DEFAULT_SETTINGS = {
   rerankerType: "openai",
   rerankerModel: "gpt-4.1-mini"
 };
+function parseProvider(value) {
+  return value === "openai" ? "openai" : "none";
+}
+function parseRerankerType(value) {
+  return value === "openai" ? "openai" : "heuristic";
+}
 var AICopilotSettingTab = class extends import_obsidian2.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
@@ -565,7 +640,7 @@ var AICopilotSettingTab = class extends import_obsidian2.PluginSettingTab {
     containerEl.createEl("h2", { text: "AI Copilot Settings" });
     new import_obsidian2.Setting(containerEl).setName("Provider").setDesc("LLM provider used by chat + refinement").addDropdown(
       (d) => d.addOption("none", "None (dry-run)").addOption("openai", "OpenAI").setValue(this.plugin.settings.provider).onChange(async (value) => {
-        this.plugin.settings.provider = value;
+        this.plugin.settings.provider = parseProvider(value);
         await this.plugin.saveSettings();
       })
     );
@@ -670,7 +745,7 @@ var AICopilotSettingTab = class extends import_obsidian2.PluginSettingTab {
     );
     new import_obsidian2.Setting(containerEl).setName("Reranker engine").setDesc("Best quality: OpenAI LLM reranker").addDropdown(
       (d) => d.addOption("openai", "OpenAI (best quality)").addOption("heuristic", "Heuristic (local fallback)").setValue(this.plugin.settings.rerankerType).onChange(async (value) => {
-        this.plugin.settings.rerankerType = value;
+        this.plugin.settings.rerankerType = parseRerankerType(value);
         await this.plugin.saveSettings();
       })
     );
@@ -754,8 +829,13 @@ ${output}`);
         const notes = await this.getAllNotes();
         if (!this.vectorIndex) this.initializeVectorIndex();
         const count = await this.vectorIndex.rebuild(
-          notes.map((n) => ({ path: n.path, content: `${n.path}
-${n.content}` })),
+          notes.map((n) => ({
+            id: `${n.path}#full`,
+            path: n.path,
+            content: `${n.path}
+${n.content}`,
+            mtime: n.mtime
+          })),
           this.settings.embeddingModel
         );
         new import_obsidian3.Notice(`AI Copilot: rebuilt vector index for ${count} notes.`);
@@ -773,22 +853,19 @@ ${n.content}` })),
         if (!this.vectorIndex) this.initializeVectorIndex();
         const tf = file;
         const content = await this.app.vault.read(tf);
-        const chunks = chunkMarkdownByHeading(tf.path, content, this.settings.retrievalChunkSize).map((c) => ({
-          id: c.chunkId,
-          path: c.path,
-          content: `${c.path}
-${c.heading}
-${c.text}`,
-          mtime: tf.stat.mtime
-        }));
-        await this.vectorIndex.indexChunks(chunks, this.settings.embeddingModel);
+        await syncIndexedNote(
+          this.vectorIndex,
+          { path: tf.path, content, mtime: tf.stat.mtime },
+          this.settings.embeddingModel,
+          this.settings.retrievalChunkSize
+        );
       })
     );
     this.registerEvent(
       this.app.vault.on("delete", async (file) => {
         if (!("path" in file) || !file.path.endsWith(".md")) return;
         if (!this.vectorIndex) this.initializeVectorIndex();
-        await this.vectorIndex.removePath(file.path);
+        await removeIndexedNote(this.vectorIndex, file.path);
       })
     );
     new import_obsidian3.Notice("AI Copilot loaded.");
@@ -912,29 +989,6 @@ ${(/* @__PURE__ */ new Date()).toISOString()}
     const files = this.app.vault.getMarkdownFiles().filter((f) => f.stat.mtime >= cutoff);
     return Promise.all(files.map(async (f) => ({ path: f.path, content: await this.app.vault.read(f) })));
   }
-  mergeChunkResultsToFullNotes(results) {
-    const grouped = /* @__PURE__ */ new Map();
-    for (const r of results) {
-      const arr = grouped.get(r.path) ?? [];
-      arr.push(r);
-      grouped.set(r.path, arr);
-    }
-    const merged = [];
-    for (const [path, chunks] of grouped.entries()) {
-      const top = [...chunks].sort((a, b) => b.score - a.score)[0];
-      const sectionContext = chunks.sort((a, b) => b.score - a.score).slice(0, 2).map((c, i) => `## Relevant Section ${i + 1}
-${c.content}`).join("\n\n");
-      const fullNote = chunks[0].metadata?.fullContent ?? chunks[0].content;
-      merged.push({
-        ...top,
-        content: `${sectionContext}
-
-## Full Note (${path})
-${fullNote}`
-      });
-    }
-    return merged.sort((a, b) => b.score - a.score);
-  }
   async getRelevantNotes(query, maxResults) {
     const notes = await this.getAllNotes();
     const queryTerms = tokenize(query);
@@ -954,9 +1008,7 @@ ${fullNote}`
     for (const c of pre) {
       const chunks = chunkMarkdownByHeading(c.n.path, c.n.content, this.settings.retrievalChunkSize);
       for (const ch of chunks) {
-        const chunkContent = `${c.n.path}
-${ch.heading}
-${ch.text}`;
+        const chunkContent = formatChunkContent(c.n.path, ch.heading, ch.text);
         const docVec = await this.vectorIndex.getOrCreate(
           ch.chunkId,
           c.n.path,
@@ -968,8 +1020,7 @@ ${ch.text}`;
         const score = this.settings.retrievalLexicalWeight * c.lex + this.settings.retrievalSemanticWeight * sem + this.settings.retrievalFreshnessWeight * c.fresh;
         ranked.push({
           path: c.n.path,
-          content: `# ${ch.heading}
-${ch.text}`,
+          content: formatChunkPreview(ch.heading, ch.text),
           mtime: c.n.mtime,
           score,
           lexicalScore: c.lex,
@@ -1004,6 +1055,6 @@ ${x.content}`, x]));
     } else {
       final = final.slice(0, maxResults);
     }
-    return this.mergeChunkResultsToFullNotes(final).slice(0, maxResults);
+    return mergeChunkResultsToFullNotes(final).slice(0, maxResults);
   }
 };
