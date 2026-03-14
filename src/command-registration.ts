@@ -1,18 +1,10 @@
 import { type App, type Command, Notice, TFile } from "obsidian";
-import { toMarkdownPlan } from "./planner";
-import { buildRefinementPrompt, extractTodos } from "./refinement";
-import { applyPatchSet, type PatchTransaction } from "./patcher";
-import {
-  applyPatchPlan,
-  previewPatchPlan,
-  toMarkdownPatchPlanPreview,
-  validatePatchPlan,
-  type PatchPlan
-} from "./patch-plan";
+import { toMarkdownPlan, buildRefinementPlan } from "./planner";
+import { buildRefinementPrompt } from "./refinement";
+import type { PatchTransaction } from "./patcher";
 import { buildClient } from "./llm";
 import type { ChatOrchestrator } from "./chat-orchestrator";
 import type { IndexingOrchestrator } from "./indexing-orchestrator";
-import { buildRefinementPlan } from "./planner";
 import type { AICopilotSettings } from "./settings";
 import { buildPatchPlanSystemPrompt } from "./patch-plan-parser";
 import {

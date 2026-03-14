@@ -188,6 +188,106 @@ describe("buildRollbackContents", () => {
   });
 });
 
+// ── end-to-end: preview → auto-apply → rollback ─────────────────────
+
+describe("end-to-end smart refinement flow", () => {
+  it("preview → safe auto-apply → rollback restores originals", () => {
+    const content = "# Notes\n\nDiscuss teh roadmap with team.\nReview buget allocations.\n";
+    const llmOutput = '```json\n' + JSON.stringify({
+      path: "notes/meeting.md",
+      title: "Fix typos",
+      edits: [
+        { find: "teh", replace: "the", reason: "typo", confidence: 0.95, risk: "safe" },
+        { find: "buget", replace: "budget", reason: "typo", confidence: 0.92, risk: "safe" },
+        { find: "# Notes", replace: "# Meeting Notes", reason: "better title", confidence: 0.6, risk: "moderate" }
+      ]
+    }) + '\n```';
+
+    const fileContents = new Map([["notes/meeting.md", content]]);
+    const candidates = [{ path: "notes/meeting.md", content }];
+
+    // Step 1: Preview
+    const preview = buildRefinementPreview(llmOutput, fileContents, candidates);
+    expect(preview.singleFilePreviews).toHaveLength(1);
+
+    // Step 2: Auto-apply decision (safe only)
+    const decision = buildSafeAutoApplyDecision(preview);
+    expect(decision.singleFileSelections).toHaveLength(1);
+    // Edits 0,1 (safe+high-conf) selected; edit 2 (moderate risk, low confidence) excluded
+    expect(decision.singleFileSelections![0].selectedEditIndices).toContain(0);
+    expect(decision.singleFileSelections![0].selectedEditIndices).toContain(1);
+    expect(decision.singleFileSelections![0].selectedEditIndices).not.toContain(2);
+
+    // Step 3: Apply
+    const { result, snapshot } = applyRefinementDecision(preview, decision, fileContents);
+    const applied = result.singleFileResults[0].applied;
+    expect(applied.finalContent).toContain("the roadmap");
+    expect(applied.finalContent).toContain("budget");
+    expect(applied.finalContent).toContain("# Notes"); // title NOT changed
+
+    // Step 4: Rollback
+    const rollback = buildRollbackContents(snapshot);
+    expect(rollback.get("notes/meeting.md")).toBe(content);
+  });
+
+  it("blocks edits touching secrets in auto-apply", () => {
+    const content = "api_key: sk-ant-abcdefghijklmnopqrstuvwxyz123456";
+    const llmOutput = '```json\n' + JSON.stringify({
+      path: "config.md",
+      edits: [
+        { find: "sk-ant-abcdefghijklmnopqrstuvwxyz123456", replace: "[REDACTED]", reason: "remove secret", confidence: 0.99, risk: "safe" }
+      ]
+    }) + '\n```';
+
+    const fileContents = new Map([["config.md", content]]);
+    const candidates = [{ path: "config.md", content }];
+
+    const preview = buildRefinementPreview(llmOutput, fileContents, candidates, { blockSecretTouching: true });
+
+    // Safety issues flagged
+    expect(preview.singleFilePreviews[0].preview.edits[0].safetyIssues.length).toBeGreaterThan(0);
+
+    // Auto-apply excludes this edit
+    const decision = buildSafeAutoApplyDecision(preview);
+    expect(decision.singleFileSelections).toHaveLength(0);
+  });
+
+  it("handles mixed single and multi-file plans together", () => {
+    const llmOutput = [
+      '```json\n' + JSON.stringify({
+        path: "standalone.md",
+        edits: [{ find: "foo", replace: "bar", reason: "rename", confidence: 0.9, risk: "safe" }]
+      }) + '\n```',
+      '```json\n' + JSON.stringify({
+        title: "Multi-file fix",
+        files: [
+          { path: "a.md", edits: [{ find: "old", replace: "new", reason: "update", confidence: 0.85, risk: "safe" }] },
+          { path: "b.md", edits: [{ find: "legacy", replace: "modern", reason: "modernize", confidence: 0.88, risk: "safe" }] }
+        ]
+      }) + '\n```'
+    ].join("\n\n");
+
+    const fileContents = new Map([
+      ["standalone.md", "foo content"],
+      ["a.md", "old stuff"],
+      ["b.md", "legacy code"]
+    ]);
+    const candidates = [
+      { path: "standalone.md", content: "foo content" },
+      { path: "a.md", content: "old stuff" },
+      { path: "b.md", content: "legacy code" }
+    ];
+
+    const preview = buildRefinementPreview(llmOutput, fileContents, candidates);
+    expect(preview.singleFilePreviews).toHaveLength(1);
+    expect(preview.multiFilePreviews).toHaveLength(1);
+
+    const decision = buildSafeAutoApplyDecision(preview);
+    expect(decision.singleFileSelections!.length).toBeGreaterThan(0);
+    expect(decision.multiFileSelections!.length).toBeGreaterThan(0);
+  });
+});
+
 // ── markdown formatting ─────────────────────────────────────────────
 
 describe("toMarkdownRefinementPreview", () => {

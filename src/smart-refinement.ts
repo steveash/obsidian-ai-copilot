@@ -3,10 +3,7 @@ import {
   applyMultiFilePatchPlan,
   detectConflicts,
   previewPatchPlan,
-  rollbackToSnapshot,
   toMarkdownPatchPlanPreview,
-  validatePatchPlan,
-  validateMultiFilePatchPlan,
   type AppliedPatchPlan,
   type MultiFileApplyResult,
   type MultiFilePatchPlan,
@@ -15,9 +12,8 @@ import {
   type ConflictInfo
 } from "./patch-plan";
 import type { PatchSafetyConfig } from "./patch-safety";
-import { parseLLMPatchResponse, buildPatchPlanSystemPrompt, type ParseResult } from "./patch-plan-parser";
-import { buildRefinementPrompt, extractTodos } from "./refinement";
-import { buildRefinementPlan, toMarkdownPlan } from "./planner";
+import { parseLLMPatchResponse, type ParseResult } from "./patch-plan-parser";
+import { extractTodos } from "./refinement";
 import type { RefineCandidate } from "./refinement";
 
 // ── types ────────────────────────────────────────────────────────────
