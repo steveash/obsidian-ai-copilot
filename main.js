@@ -117,13 +117,85 @@ var init_patcher = __esm({
   }
 });
 
+// src/patch-safety.ts
+function checkPathProtected(path, protectedPaths = DEFAULT_PROTECTED_PATHS) {
+  const issues = [];
+  for (const pp of protectedPaths) {
+    if (path === pp || path.startsWith(pp)) {
+      issues.push(`path "${path}" is protected (matches "${pp}")`);
+    }
+  }
+  return { safe: issues.length === 0, issues };
+}
+function checkEditSize(find, replace, maxSize = DEFAULT_MAX_EDIT_SIZE) {
+  const issues = [];
+  if (find.length > maxSize) {
+    issues.push(`find string exceeds max edit size (${find.length} > ${maxSize})`);
+  }
+  if (replace.length > maxSize) {
+    issues.push(`replace string exceeds max edit size (${replace.length} > ${maxSize})`);
+  }
+  return { safe: issues.length === 0, issues };
+}
+function checkSecretTouching(find, replace) {
+  const issues = [];
+  for (const pattern of SECRET_PATTERNS) {
+    if (pattern.test(find)) {
+      issues.push("find string contains a potential secret/credential pattern");
+      break;
+    }
+  }
+  for (const pattern of SECRET_PATTERNS) {
+    if (pattern.test(replace)) {
+      issues.push("replace string contains a potential secret/credential pattern");
+      break;
+    }
+  }
+  return { safe: issues.length === 0, issues };
+}
+function runSafetyChecks(path, find, replace, config = {}) {
+  const allIssues = [];
+  const pathCheck = checkPathProtected(path, config.protectedPaths);
+  allIssues.push(...pathCheck.issues);
+  const sizeCheck = checkEditSize(find, replace, config.maxEditSize);
+  allIssues.push(...sizeCheck.issues);
+  if (config.blockSecretTouching !== false) {
+    const secretCheck = checkSecretTouching(find, replace);
+    allIssues.push(...secretCheck.issues);
+  }
+  return { safe: allIssues.length === 0, issues: allIssues };
+}
+var SECRET_PATTERNS, DEFAULT_PROTECTED_PATHS, DEFAULT_MAX_EDIT_SIZE;
+var init_patch_safety = __esm({
+  "src/patch-safety.ts"() {
+    "use strict";
+    SECRET_PATTERNS = [
+      /sk-ant-[A-Za-z0-9\-_]{20,}/,
+      /sk-[A-Za-z0-9]{20,}/,
+      /AKIA[A-Z0-9]{16}/,
+      /(?:api[_-]?key|secret|password|token)\s*[:=]\s*["']?[A-Za-z0-9_\-/+=]{12,}/i
+    ];
+    DEFAULT_PROTECTED_PATHS = [
+      ".obsidian/",
+      ".git/",
+      "node_modules/",
+      ".env"
+    ];
+    DEFAULT_MAX_EDIT_SIZE = 5e4;
+  }
+});
+
 // src/patch-plan.ts
 var patch_plan_exports = {};
 __export(patch_plan_exports, {
+  applyMultiFilePatchPlan: () => applyMultiFilePatchPlan,
   applyPatchPlan: () => applyPatchPlan,
+  detectConflicts: () => detectConflicts,
   previewPatchPlan: () => previewPatchPlan,
   rollbackPatchPlan: () => rollbackPatchPlan,
+  rollbackToSnapshot: () => rollbackToSnapshot,
   toMarkdownPatchPlanPreview: () => toMarkdownPatchPlanPreview,
+  validateMultiFilePatchPlan: () => validateMultiFilePatchPlan,
   validatePatchPlan: () => validatePatchPlan
 });
 function validatePatchPlan(plan) {
@@ -144,9 +216,62 @@ function validatePatchPlan(plan) {
   });
   return { valid: issues.length === 0, issues };
 }
-function previewPatchPlan(content, plan) {
+function validateMultiFilePatchPlan(plan) {
+  const issues = [];
+  if (!plan.files.length) issues.push("at least one file is required");
+  for (const file of plan.files) {
+    const fileValidation = validatePatchPlan(file);
+    if (!fileValidation.valid) {
+      issues.push(...fileValidation.issues.map((i) => `[${file.path}] ${i}`));
+    }
+  }
+  return { valid: issues.length === 0, issues };
+}
+function detectConflicts(content, edits) {
+  const conflicts = [];
+  let simulated = content;
+  for (let i = 0; i < edits.length; i++) {
+    const edit = edits[i];
+    const occurrences = countOccurrences2(simulated, edit.find);
+    if (occurrences === 0) {
+      conflicts.push({
+        editIndex: i,
+        reason: edit.reason,
+        find: edit.find.slice(0, 100),
+        conflict: "stale",
+        detail: "find text not present in content (stale region)"
+      });
+    } else if (occurrences > 1 && !edit.replaceAll) {
+      conflicts.push({
+        editIndex: i,
+        reason: edit.reason,
+        find: edit.find.slice(0, 100),
+        conflict: "ambiguous",
+        detail: `find text matches ${occurrences} locations; consider replaceAll or a more specific find`
+      });
+    }
+    if (occurrences > 0) {
+      simulated = edit.replaceAll ? simulated.split(edit.find).join(edit.replace) : simulated.replace(edit.find, edit.replace);
+    }
+  }
+  return conflicts;
+}
+function countOccurrences2(content, find) {
+  if (!find) return 0;
+  let count = 0;
+  let idx = 0;
+  while (true) {
+    idx = content.indexOf(find, idx);
+    if (idx < 0) return count;
+    count += 1;
+    idx += find.length;
+  }
+}
+function previewPatchPlan(content, plan, safetyConfig) {
   let next = content;
   const edits = plan.edits.map((edit, idx) => {
+    const v2 = edit;
+    const safety = runSafetyChecks(plan.path, edit.find, edit.replace, safetyConfig);
     const p = previewPatch(next, {
       path: plan.path,
       find: edit.find,
@@ -164,7 +289,10 @@ function previewPatchPlan(content, plan) {
       occurrences: p.occurrences,
       status: p.applied ? "applied" : "no-op (find text not found)",
       beforeSample: p.beforeSample,
-      afterSample: p.afterSample
+      afterSample: p.afterSample,
+      confidence: v2.confidence,
+      risk: v2.risk,
+      safetyIssues: safety.issues
     };
   });
   return {
@@ -173,29 +301,93 @@ function previewPatchPlan(content, plan) {
     summary: {
       totalEdits: edits.length,
       appliedEdits: edits.filter((e) => e.applied).length,
-      totalOccurrences: edits.reduce((sum, e) => sum + e.occurrences, 0)
+      totalOccurrences: edits.reduce((sum, e) => sum + e.occurrences, 0),
+      safeEdits: edits.filter((e) => (e.risk ?? "safe") === "safe" && e.safetyIssues.length === 0).length,
+      unsafeEdits: edits.filter((e) => e.risk === "unsafe" || e.safetyIssues.length > 0).length
     },
     edits
   };
 }
-function applyPatchPlan(content, plan) {
-  const patches = plan.edits.map((edit) => ({
+function applyPatchPlan(content, plan, options) {
+  const snapshot = content;
+  const selected = options?.selectedIndices;
+  const editsToApply = selected ? plan.edits.filter((_, i) => selected.includes(i)) : plan.edits;
+  const patches = editsToApply.map((edit) => ({
     path: plan.path,
     find: edit.find,
     replace: edit.replace,
     reason: edit.reason,
     replaceAll: edit.replaceAll
   }));
-  const applied = applyPatchSet(content, patches);
+  const safePatchesAndTxs = patches.map((patch) => {
+    if (!options?.safetyConfig) return { patch, safetyOk: true };
+    const check = runSafetyChecks(patch.path, patch.find, patch.replace, options.safetyConfig);
+    return { patch, safetyOk: check.safe };
+  });
+  const filteredPatches = safePatchesAndTxs.filter((p) => p.safetyOk).map((p) => p.patch);
+  const applied = applyPatchSet(content, filteredPatches);
   const appliedCount = applied.transactions.filter((tx) => tx.applied).length;
+  const skippedCount = safePatchesAndTxs.filter((p) => !p.safetyOk).length;
+  let summary = `Applied ${appliedCount}/${patches.length} edit(s)`;
+  if (skippedCount) summary += ` (${skippedCount} blocked by safety)`;
+  if (selected) summary += ` [subset: ${selected.length}/${plan.edits.length} selected]`;
   return {
     finalContent: applied.finalContent,
     transactions: applied.transactions,
-    summary: `Applied ${appliedCount}/${patches.length} edit(s)`
+    snapshot,
+    summary
   };
+}
+function applyMultiFilePatchPlan(fileContents, plan, options) {
+  const results = [];
+  for (const file of plan.files) {
+    const content = fileContents.get(file.path);
+    if (content === void 0) {
+      results.push({
+        path: file.path,
+        applied: { finalContent: "", transactions: [], snapshot: "", summary: "file not found" },
+        safetyCheck: { safe: false, issues: [`file "${file.path}" not found in provided contents`] },
+        conflicts: [],
+        skipped: true
+      });
+      continue;
+    }
+    const safetyCheck = runSafetyChecks(file.path, "", "", options?.safetyConfig);
+    const conflicts = detectConflicts(content, file.edits);
+    const staleConflicts = conflicts.filter((c) => c.conflict === "stale");
+    if (!safetyCheck.safe) {
+      results.push({
+        path: file.path,
+        applied: { finalContent: content, transactions: [], snapshot: content, summary: "blocked by safety" },
+        safetyCheck,
+        conflicts,
+        skipped: true
+      });
+      continue;
+    }
+    const selectedIndices = options?.selectedEdits?.get(file.path);
+    const applied = applyPatchPlan(content, file, {
+      selectedIndices,
+      safetyConfig: options?.safetyConfig
+    });
+    results.push({
+      path: file.path,
+      applied,
+      safetyCheck,
+      conflicts,
+      skipped: false
+    });
+  }
+  const totalApplied = results.filter((r) => !r.skipped).length;
+  const totalSkipped = results.filter((r) => r.skipped).length;
+  const summary = `Multi-file patch: ${totalApplied} file(s) processed, ${totalSkipped} skipped`;
+  return { title: plan.title, results, summary };
 }
 function rollbackPatchPlan(content, transactions) {
   return rollbackTransactions(content, transactions);
+}
+function rollbackToSnapshot(snapshot) {
+  return snapshot;
 }
 function toMarkdownPatchPlanPreview(preview) {
   const lines = [
@@ -203,6 +395,7 @@ function toMarkdownPatchPlanPreview(preview) {
     preview.title ? `Title: ${preview.title}` : null,
     `Path: ${preview.path}`,
     `Summary: ${preview.summary.appliedEdits}/${preview.summary.totalEdits} edits apply \xB7 ${preview.summary.totalOccurrences} total occurrences`,
+    preview.summary.unsafeEdits ? `\u26A0 ${preview.summary.unsafeEdits} edit(s) flagged unsafe` : null,
     ""
   ].filter(Boolean);
   for (const edit of preview.edits) {
@@ -210,6 +403,11 @@ function toMarkdownPatchPlanPreview(preview) {
     lines.push(`- Applied: ${edit.applied ? "yes" : "no"}`);
     lines.push(`- Status: ${edit.status}`);
     lines.push(`- Occurrences: ${edit.occurrences}`);
+    if (edit.confidence !== void 0) lines.push(`- Confidence: ${(edit.confidence * 100).toFixed(0)}%`);
+    if (edit.risk) lines.push(`- Risk: ${edit.risk}`);
+    if (edit.safetyIssues.length) {
+      lines.push(`- Safety issues: ${edit.safetyIssues.join("; ")}`);
+    }
     lines.push("- Before sample:");
     lines.push("```md");
     lines.push(edit.beforeSample);
@@ -226,6 +424,7 @@ var init_patch_plan = __esm({
   "src/patch-plan.ts"() {
     "use strict";
     init_patcher();
+    init_patch_safety();
   }
 });
 
