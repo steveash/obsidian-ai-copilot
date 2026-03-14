@@ -14,6 +14,15 @@ import type { ChatOrchestrator } from "./chat-orchestrator";
 import type { IndexingOrchestrator } from "./indexing-orchestrator";
 import { buildRefinementPlan } from "./planner";
 import type { AICopilotSettings } from "./settings";
+import { buildPatchPlanSystemPrompt } from "./patch-plan-parser";
+import {
+  buildRefinementPreview,
+  applyRefinementDecision,
+  buildSafeAutoApplyDecision,
+  buildRollbackContents,
+  toMarkdownRefinementPreview,
+  type SmartRefinementSnapshot
+} from "./smart-refinement";
 
 export interface CommandContext {
   addCommand: (command: Command) => void;
@@ -22,6 +31,9 @@ export interface CommandContext {
   setLastPatchState: (transactions: PatchTransaction[], path: string) => void;
   clearLastPatchState: () => void;
   getLastPatchState: () => { transactions: PatchTransaction[]; path: string | null };
+  setLastRefinementSnapshot: (snapshot: SmartRefinementSnapshot) => void;
+  clearLastRefinementSnapshot: () => void;
+  getLastRefinementSnapshot: () => SmartRefinementSnapshot | null;
   writeAssistantOutput: (name: string, body: string) => Promise<void>;
   runRefinementPass: () => Promise<void>;
 }
@@ -81,23 +93,100 @@ export function registerPluginCommands(
       const file = ctx.app.workspace.getActiveFile();
       if (!file) return void new Notice("No active note selected.");
       const content = await ctx.app.vault.read(file);
-      const plan: PatchPlan = {
-        path: file.path,
-        title: "Normalize common markdown spacing",
-        edits: [
-          { find: "  ", replace: " ", reason: "normalize spacing", replaceAll: true },
-          { find: "\t", replace: "  ", reason: "replace tabs with spaces" }
-        ]
-      };
+      const settings = ctx.getSettings();
 
-      const validation = validatePatchPlan(plan);
-      if (!validation.valid) {
-        return void new Notice(`Invalid patch plan: ${validation.issues.join("; ")}`);
+      new Notice("AI Copilot: generating refinement preview…");
+      const candidates = [{ path: file.path, content }];
+      const prompt = buildRefinementPrompt(candidates, {
+        enableWebEnrichment: settings.enableWebEnrichment
+      });
+      const plan = buildRefinementPlan(candidates);
+      const llmOutput = await buildClient(settings).chat(
+        `${toMarkdownPlan(plan)}\n\n${prompt}`,
+        buildPatchPlanSystemPrompt()
+      );
+
+      const fileContents = new Map([[file.path, content]]);
+      const preview = buildRefinementPreview(llmOutput, fileContents, candidates);
+      const md = toMarkdownRefinementPreview(preview);
+      await ctx.writeAssistantOutput("Refinement Log", md);
+
+      const editCount = preview.singleFilePreviews.reduce(
+        (sum, p) => sum + p.preview.summary.totalEdits, 0
+      );
+      new Notice(`AI Copilot: preview logged — ${editCount} edit(s) proposed.`);
+    }
+  });
+
+  ctx.addCommand({
+    id: "ai-copilot-smart-apply-safe",
+    name: "AI Copilot: Auto-apply safe refinement edits",
+    callback: async () => {
+      const file = ctx.app.workspace.getActiveFile();
+      if (!file) return void new Notice("No active note selected.");
+      const content = await ctx.app.vault.read(file);
+      const settings = ctx.getSettings();
+
+      new Notice("AI Copilot: analyzing note for safe edits…");
+      const candidates = [{ path: file.path, content }];
+      const prompt = buildRefinementPrompt(candidates, {
+        enableWebEnrichment: settings.enableWebEnrichment
+      });
+      const plan = buildRefinementPlan(candidates);
+      const llmOutput = await buildClient(settings).chat(
+        `${toMarkdownPlan(plan)}\n\n${prompt}`,
+        buildPatchPlanSystemPrompt()
+      );
+
+      const fileContents = new Map([[file.path, content]]);
+      const preview = buildRefinementPreview(llmOutput, fileContents, candidates);
+      const decision = buildSafeAutoApplyDecision(preview);
+
+      const totalSafe = (decision.singleFileSelections ?? []).reduce(
+        (sum, s) => sum + (s.selectedEditIndices?.length ?? 0), 0
+      );
+
+      if (totalSafe === 0) {
+        await ctx.writeAssistantOutput("Refinement Log", toMarkdownRefinementPreview(preview));
+        return void new Notice("AI Copilot: no safe edits to apply. Preview logged.");
       }
 
-      const preview = previewPatchPlan(content, plan);
-      await ctx.writeAssistantOutput("Refinement Log", toMarkdownPatchPlanPreview(preview));
-      new Notice(`AI Copilot: patch preview logged (${preview.summary.appliedEdits}/${preview.summary.totalEdits} edits).`);
+      const { result, snapshot } = applyRefinementDecision(preview, decision, fileContents);
+
+      for (const sr of result.singleFileResults) {
+        if (sr.applied.transactions.some((t) => t.applied)) {
+          const f = ctx.app.vault.getAbstractFileByPath(sr.path);
+          if (f instanceof TFile) await ctx.app.vault.modify(f, sr.applied.finalContent);
+        }
+      }
+
+      ctx.setLastRefinementSnapshot(snapshot);
+      await ctx.writeAssistantOutput("Refinement Log",
+        `## Smart Apply (safe only)\n${result.summary}\n\n${toMarkdownRefinementPreview(preview)}`
+      );
+      new Notice(`AI Copilot: applied ${totalSafe} safe edit(s).`);
+    }
+  });
+
+  ctx.addCommand({
+    id: "ai-copilot-rollback-smart-refinement",
+    name: "AI Copilot: Roll back last smart refinement",
+    callback: async () => {
+      const snapshot = ctx.getLastRefinementSnapshot();
+      if (!snapshot) return void new Notice("No smart refinement snapshot available for rollback.");
+
+      const rollbackContents = buildRollbackContents(snapshot);
+      let restored = 0;
+      for (const [path, original] of rollbackContents) {
+        const f = ctx.app.vault.getAbstractFileByPath(path);
+        if (f instanceof TFile) {
+          await ctx.app.vault.modify(f, original);
+          restored++;
+        }
+      }
+
+      ctx.clearLastRefinementSnapshot();
+      new Notice(`AI Copilot: rolled back ${restored} file(s) to pre-refinement state.`);
     }
   });
 
@@ -144,7 +233,8 @@ export async function runRefinementFlow(
   settings: AICopilotSettings,
   setLastPatchState: (transactions: PatchTransaction[], path: string) => void,
   app: App,
-  writeAssistantOutput: (name: string, body: string) => Promise<void>
+  writeAssistantOutput: (name: string, body: string) => Promise<void>,
+  setLastRefinementSnapshot?: (snapshot: SmartRefinementSnapshot) => void
 ) {
   if (!candidates.length) return void new Notice("AI Copilot: no recent notes to refine.");
 
@@ -154,46 +244,37 @@ export async function runRefinementFlow(
   });
   const output = await buildClient(settings).chat(
     `${toMarkdownPlan(plan)}\n\n${prompt}`,
-    "You refine markdown notes and preserve intent."
+    buildPatchPlanSystemPrompt()
   );
 
-  const todos = candidates.flatMap((n) => extractTodos(n.content));
-  if (settings.refinementAutoApply && candidates[0]) {
-    const c = candidates[0];
-    const patchPlan: PatchPlan = {
-      path: c.path,
-      title: "Auto-normalize spacing",
-      edits: [{ find: "  ", replace: " ", reason: "normalize spacing", replaceAll: true }]
-    };
+  const fileContents = new Map(candidates.map((c) => [c.path, c.content]));
+  const preview = buildRefinementPreview(output, fileContents, candidates);
 
-    if (validatePatchPlan(patchPlan).valid) {
-      const applied = applyPatchPlan(c.content, patchPlan);
-      if (applied.transactions.some((tx) => tx.applied)) {
-        const file = app.vault.getAbstractFileByPath(c.path);
-        if (file instanceof TFile) {
-          await app.vault.modify(file, applied.finalContent);
-          setLastPatchState(applied.transactions, c.path);
+  if (settings.refinementAutoApply) {
+    const decision = buildSafeAutoApplyDecision(preview);
+    const totalSafe = (decision.singleFileSelections ?? []).reduce(
+      (sum, s) => sum + (s.selectedEditIndices?.length ?? 0), 0
+    );
+
+    if (totalSafe > 0) {
+      const { result, snapshot } = applyRefinementDecision(preview, decision, fileContents);
+
+      for (const sr of result.singleFileResults) {
+        if (sr.applied.transactions.some((t) => t.applied)) {
+          const file = app.vault.getAbstractFileByPath(sr.path);
+          if (file instanceof TFile) {
+            await app.vault.modify(file, sr.applied.finalContent);
+            // Also set legacy patch state for backward compat rollback
+            setLastPatchState(sr.applied.transactions, sr.path);
+          }
         }
       }
-    } else {
-      const { finalContent, transactions } = applyPatchSet(c.content, [
-        {
-          path: c.path,
-          find: "  ",
-          replace: " ",
-          reason: "normalize spacing"
-        }
-      ]);
-      if (transactions.some((tx) => tx.applied)) {
-        const file = app.vault.getAbstractFileByPath(c.path);
-        if (file instanceof TFile) {
-          await app.vault.modify(file, finalContent);
-          setLastPatchState(transactions, c.path);
-        }
-      }
+
+      if (setLastRefinementSnapshot) setLastRefinementSnapshot(snapshot);
     }
   }
 
-  new Notice(`AI Copilot: scanned ${candidates.length} notes · TODOs ${todos.length}`);
-  await writeAssistantOutput("Refinement Log", `${toMarkdownPlan(plan)}\n\n## LLM Output\n${output}`);
+  const md = toMarkdownRefinementPreview(preview);
+  new Notice(`AI Copilot: scanned ${candidates.length} notes · TODOs ${preview.todoCount}`);
+  await writeAssistantOutput("Refinement Log", `${toMarkdownPlan(plan)}\n\n${md}\n\n## Raw LLM Output\n${output}`);
 }

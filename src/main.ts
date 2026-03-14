@@ -8,12 +8,14 @@ import { IndexingOrchestrator } from "./indexing-orchestrator";
 import { ChatOrchestrator } from "./chat-orchestrator";
 import { registerPluginCommands, runRefinementFlow } from "./command-registration";
 import type { PatchTransaction } from "./patcher";
+import type { SmartRefinementSnapshot } from "./smart-refinement";
 
 export default class AICopilotPlugin extends Plugin {
   settings: AICopilotSettings = DEFAULT_SETTINGS;
   private intervalId: number | null = null;
   private lastPatchTransactions: PatchTransaction[] = [];
   private lastPatchTargetPath: string | null = null;
+  private lastRefinementSnapshot: SmartRefinementSnapshot | null = null;
 
   private indexing = new IndexingOrchestrator(this.app, () => this.settings);
   private retrieval = new RetrievalOrchestrator({
@@ -53,6 +55,9 @@ export default class AICopilotPlugin extends Plugin {
           this.lastPatchTargetPath = null;
         },
         getLastPatchState: () => ({ transactions: this.lastPatchTransactions, path: this.lastPatchTargetPath }),
+        setLastRefinementSnapshot: (snapshot) => { this.lastRefinementSnapshot = snapshot; },
+        clearLastRefinementSnapshot: () => { this.lastRefinementSnapshot = null; },
+        getLastRefinementSnapshot: () => this.lastRefinementSnapshot,
         writeAssistantOutput: (name, body) => this.writeAssistantOutput(name, body),
         runRefinementPass: () => this.runRefinementPass()
       },
@@ -101,7 +106,8 @@ export default class AICopilotPlugin extends Plugin {
         this.lastPatchTargetPath = path;
       },
       this.app,
-      (name, body) => this.writeAssistantOutput(name, body)
+      (name, body) => this.writeAssistantOutput(name, body),
+      (snapshot) => { this.lastRefinementSnapshot = snapshot; }
     );
   }
 

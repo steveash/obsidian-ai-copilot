@@ -1848,9 +1848,326 @@ function toMarkdownPlan(plan) {
   ].join("\n");
 }
 
-// src/command-registration.ts
-init_patcher();
+// src/patch-plan-parser.ts
+function extractJsonBlocks(text) {
+  const blocks = [];
+  const fenced = /```(?:json)?\s*\n([\s\S]*?)```/g;
+  let match;
+  while ((match = fenced.exec(text)) !== null) {
+    blocks.push(match[1].trim());
+  }
+  if (blocks.length === 0) {
+    const bare = /(?:^|\n)\s*(\{[\s\S]*?\})\s*(?:\n|$)/g;
+    while ((match = bare.exec(text)) !== null) {
+      blocks.push(match[1].trim());
+    }
+    const bareArr = /(?:^|\n)\s*(\[[\s\S]*?\])\s*(?:\n|$)/g;
+    while ((match = bareArr.exec(text)) !== null) {
+      blocks.push(match[1].trim());
+    }
+  }
+  return blocks;
+}
+function isPatchPlanShape(obj) {
+  if (!obj || typeof obj !== "object") return false;
+  const o = obj;
+  return typeof o.path === "string" && Array.isArray(o.edits);
+}
+function isMultiFilePatchPlanShape(obj) {
+  if (!obj || typeof obj !== "object") return false;
+  const o = obj;
+  return Array.isArray(o.files) && o.files.every(
+    (f) => isPatchPlanShape(f)
+  );
+}
+function normalizeEdit(raw, index) {
+  const find = typeof raw.find === "string" ? raw.find : "";
+  const replace = typeof raw.replace === "string" ? raw.replace : "";
+  const reason = typeof raw.reason === "string" ? raw.reason : `edit ${index + 1}`;
+  const replaceAll = raw.replaceAll === true;
+  if (!find) {
+    return { edit: { find, replace, reason, replaceAll }, error: `edit ${index + 1}: missing find string` };
+  }
+  const confidence = typeof raw.confidence === "number" ? Math.max(0, Math.min(1, raw.confidence)) : void 0;
+  const risk = raw.risk === "safe" || raw.risk === "moderate" || raw.risk === "unsafe" ? raw.risk : void 0;
+  return {
+    edit: { find, replace, reason, replaceAll, confidence, risk }
+  };
+}
+function parseSinglePlan(obj) {
+  const errors = [];
+  const path = typeof obj.path === "string" ? obj.path : "";
+  const title = typeof obj.title === "string" ? obj.title : void 0;
+  if (!path) errors.push("missing path field");
+  const rawEdits = Array.isArray(obj.edits) ? obj.edits : [];
+  if (rawEdits.length === 0) errors.push("no edits provided");
+  const edits = [];
+  for (let i = 0; i < rawEdits.length; i++) {
+    const raw = rawEdits[i];
+    if (!raw || typeof raw !== "object") {
+      errors.push(`edit ${i + 1}: not an object`);
+      continue;
+    }
+    const { edit, error } = normalizeEdit(raw, i);
+    if (error) errors.push(error);
+    else edits.push(edit);
+  }
+  return { plan: { path, title, edits }, errors };
+}
+function parseLLMPatchResponse(text) {
+  const result = { plans: [], multiFilePlans: [], errors: [] };
+  const blocks = extractJsonBlocks(text);
+  if (blocks.length === 0) {
+    result.errors.push("no JSON blocks found in LLM response");
+    return result;
+  }
+  for (const block of blocks) {
+    let parsed;
+    try {
+      parsed = JSON.parse(block);
+    } catch (e) {
+      result.errors.push(`invalid JSON: ${e.message}`);
+      continue;
+    }
+    if (Array.isArray(parsed)) {
+      for (const item of parsed) {
+        if (isPatchPlanShape(item)) {
+          const { plan, errors } = parseSinglePlan(item);
+          result.plans.push(plan);
+          result.errors.push(...errors);
+        }
+      }
+      continue;
+    }
+    if (typeof parsed !== "object" || parsed === null) {
+      result.errors.push("JSON block is not an object or array");
+      continue;
+    }
+    if (isMultiFilePatchPlanShape(parsed)) {
+      const multi = parsed;
+      const title = typeof multi.title === "string" ? multi.title : void 0;
+      const files = [];
+      for (const f of multi.files) {
+        const { plan, errors } = parseSinglePlan(f);
+        files.push(plan);
+        result.errors.push(...errors);
+      }
+      result.multiFilePlans.push({ title, files });
+      continue;
+    }
+    if (isPatchPlanShape(parsed)) {
+      const { plan, errors } = parseSinglePlan(parsed);
+      result.plans.push(plan);
+      result.errors.push(...errors);
+      continue;
+    }
+    result.errors.push("JSON block does not match PatchPlan or MultiFilePatchPlan shape");
+  }
+  return result;
+}
+function buildPatchPlanSystemPrompt() {
+  return [
+    "You are an Obsidian note refinement assistant that produces structured edits.",
+    "For each note that needs changes, output a JSON patch plan inside a ```json code block.",
+    "",
+    "Single-file format:",
+    "```json",
+    "{",
+    '  "path": "folder/note.md",',
+    '  "title": "Brief description of changes",',
+    '  "edits": [',
+    "    {",
+    '      "find": "exact text to find",',
+    '      "replace": "replacement text",',
+    '      "reason": "why this change",',
+    '      "confidence": 0.95,',
+    '      "risk": "safe"',
+    "    }",
+    "  ]",
+    "}",
+    "```",
+    "",
+    "Multi-file format:",
+    "```json",
+    "{",
+    '  "title": "Bulk refinement",',
+    '  "files": [',
+    '    { "path": "note1.md", "edits": [...] },',
+    '    { "path": "note2.md", "edits": [...] }',
+    "  ]",
+    "}",
+    "```",
+    "",
+    "Rules:",
+    "- find must be an exact substring of the note content (not a regex)",
+    "- keep find strings short but unique enough to match exactly once",
+    "- set replaceAll: true only when ALL occurrences should be replaced",
+    "- confidence: 0.0-1.0 indicating how certain the edit is correct",
+    '- risk: "safe" for formatting/typo fixes, "moderate" for content changes, "unsafe" for structural changes',
+    "- Preserve the author's intent \u2014 suggest, don't rewrite",
+    "- If no edits are needed for a note, omit it entirely"
+  ].join("\n");
+}
+
+// src/smart-refinement.ts
 init_patch_plan();
+function buildRefinementPreview(llmOutput, fileContents, candidates, safetyConfig) {
+  const parseResult = parseLLMPatchResponse(llmOutput);
+  const todoCount = candidates.flatMap((c) => extractTodos(c.content)).length;
+  const singleFilePreviews = parseResult.plans.map((plan) => {
+    const content = fileContents.get(plan.path) ?? "";
+    const preview = previewPatchPlan(content, plan, safetyConfig);
+    const conflicts = content ? detectConflicts(content, plan.edits) : [];
+    return { plan, preview, conflicts };
+  });
+  const multiFilePreviews = parseResult.multiFilePlans.map((plan) => {
+    const filePreviews = plan.files.map((file) => {
+      const content = fileContents.get(file.path) ?? "";
+      const preview = previewPatchPlan(content, file, safetyConfig);
+      const conflicts = content ? detectConflicts(content, file.edits) : [];
+      return { path: file.path, preview, conflicts };
+    });
+    return { plan, filePreviews };
+  });
+  return { parseResult, singleFilePreviews, multiFilePreviews, todoCount, rawLLMOutput: llmOutput };
+}
+function applyRefinementDecision(preview, decision, fileContents, safetyConfig) {
+  const snapshotMap = /* @__PURE__ */ new Map();
+  const singleFileResults = [];
+  const multiFileResults = [];
+  if (decision.singleFileSelections) {
+    for (const sel of decision.singleFileSelections) {
+      const entry = preview.singleFilePreviews[sel.planIndex];
+      if (!entry) continue;
+      const content = fileContents.get(entry.plan.path);
+      if (content === void 0) continue;
+      snapshotMap.set(entry.plan.path, content);
+      const applied = applyPatchPlan(content, entry.plan, {
+        selectedIndices: sel.selectedEditIndices,
+        safetyConfig
+      });
+      const conflicts = detectConflicts(content, entry.plan.edits);
+      singleFileResults.push({
+        path: entry.plan.path,
+        applied,
+        conflicts
+      });
+    }
+  }
+  if (decision.multiFileSelections) {
+    for (const sel of decision.multiFileSelections) {
+      const entry = preview.multiFilePreviews[sel.planIndex];
+      if (!entry) continue;
+      for (const file of entry.plan.files) {
+        const content = fileContents.get(file.path);
+        if (content !== void 0) snapshotMap.set(file.path, content);
+      }
+      const result = applyMultiFilePatchPlan(fileContents, entry.plan, {
+        selectedEdits: sel.selectedEdits,
+        safetyConfig
+      });
+      multiFileResults.push(result);
+    }
+  }
+  const totalApplied = singleFileResults.filter((r) => r.applied.transactions.some((t) => t.applied)).length + multiFileResults.reduce((sum, r) => sum + r.results.filter((fr) => !fr.skipped).length, 0);
+  const summary = `Smart refinement: ${totalApplied} file(s) modified`;
+  return {
+    result: { singleFileResults, multiFileResults, summary },
+    snapshot: { snapshots: snapshotMap, appliedAt: Date.now() }
+  };
+}
+function buildRollbackContents(snapshot) {
+  return new Map(snapshot.snapshots);
+}
+function buildSafeAutoApplyDecision(preview) {
+  const singleFileSelections = [];
+  for (let i = 0; i < preview.singleFilePreviews.length; i++) {
+    const entry = preview.singleFilePreviews[i];
+    const conflictIndices = new Set(entry.conflicts.map((c) => c.editIndex));
+    const safeIndices = [];
+    for (let j = 0; j < entry.plan.edits.length; j++) {
+      const edit = entry.plan.edits[j];
+      const risk = edit.risk ?? "safe";
+      const confidence = edit.confidence ?? 1;
+      const isSafe = risk === "safe" && confidence >= 0.8 && !conflictIndices.has(j);
+      const previewEdit = entry.preview.edits[j];
+      const hasSafetyIssues = previewEdit?.safetyIssues?.length > 0;
+      if (isSafe && !hasSafetyIssues) safeIndices.push(j);
+    }
+    if (safeIndices.length > 0) {
+      singleFileSelections.push({ planIndex: i, selectedEditIndices: safeIndices });
+    }
+  }
+  const multiFileSelections = [];
+  for (let i = 0; i < preview.multiFilePreviews.length; i++) {
+    const entry = preview.multiFilePreviews[i];
+    const selectedEdits = /* @__PURE__ */ new Map();
+    let hasAny = false;
+    for (const fp of entry.filePreviews) {
+      const conflictIndices = new Set(fp.conflicts.map((c) => c.editIndex));
+      const fileInPlan = entry.plan.files.find((f) => f.path === fp.path);
+      if (!fileInPlan) continue;
+      const safeIndices = [];
+      for (let j = 0; j < fileInPlan.edits.length; j++) {
+        const edit = fileInPlan.edits[j];
+        const risk = edit.risk ?? "safe";
+        const confidence = edit.confidence ?? 1;
+        const isSafe = risk === "safe" && confidence >= 0.8 && !conflictIndices.has(j);
+        const hasSafetyIssues = fp.preview.edits[j]?.safetyIssues?.length > 0;
+        if (isSafe && !hasSafetyIssues) safeIndices.push(j);
+      }
+      if (safeIndices.length > 0) {
+        selectedEdits.set(fp.path, safeIndices);
+        hasAny = true;
+      }
+    }
+    if (hasAny) {
+      multiFileSelections.push({ planIndex: i, selectedEdits });
+    }
+  }
+  return { singleFileSelections, multiFileSelections };
+}
+function toMarkdownRefinementPreview(preview) {
+  const lines = ["# Refinement Preview"];
+  if (preview.parseResult.errors.length) {
+    lines.push(`
+## Parse Warnings`);
+    for (const err of preview.parseResult.errors) {
+      lines.push(`- ${err}`);
+    }
+  }
+  lines.push(`
+TODOs found: ${preview.todoCount}`);
+  for (const entry of preview.singleFilePreviews) {
+    lines.push("");
+    lines.push(toMarkdownPatchPlanPreview(entry.preview));
+    if (entry.conflicts.length) {
+      lines.push(`
+### Conflicts`);
+      for (const c of entry.conflicts) {
+        lines.push(`- Edit ${c.editIndex + 1} (${c.conflict}): ${c.detail}`);
+      }
+    }
+  }
+  for (const entry of preview.multiFilePreviews) {
+    lines.push(`
+## Multi-File Plan: ${entry.plan.title ?? "(untitled)"}`);
+    for (const fp of entry.filePreviews) {
+      lines.push("");
+      lines.push(toMarkdownPatchPlanPreview(fp.preview));
+      if (fp.conflicts.length) {
+        lines.push(`
+### Conflicts`);
+        for (const c of fp.conflicts) {
+          lines.push(`- Edit ${c.editIndex + 1} (${c.conflict}): ${c.detail}`);
+        }
+      }
+    }
+  }
+  return lines.join("\n");
+}
+
+// src/command-registration.ts
 function registerPluginCommands(ctx, chat, indexing) {
   ctx.addCommand({
     id: "ai-copilot-open-chat-panel",
@@ -1897,21 +2214,96 @@ function registerPluginCommands(ctx, chat, indexing) {
       const file = ctx.app.workspace.getActiveFile();
       if (!file) return void new import_obsidian5.Notice("No active note selected.");
       const content = await ctx.app.vault.read(file);
-      const plan = {
-        path: file.path,
-        title: "Normalize common markdown spacing",
-        edits: [
-          { find: "  ", replace: " ", reason: "normalize spacing", replaceAll: true },
-          { find: "	", replace: "  ", reason: "replace tabs with spaces" }
-        ]
-      };
-      const validation = validatePatchPlan(plan);
-      if (!validation.valid) {
-        return void new import_obsidian5.Notice(`Invalid patch plan: ${validation.issues.join("; ")}`);
+      const settings = ctx.getSettings();
+      new import_obsidian5.Notice("AI Copilot: generating refinement preview\u2026");
+      const candidates = [{ path: file.path, content }];
+      const prompt = buildRefinementPrompt(candidates, {
+        enableWebEnrichment: settings.enableWebEnrichment
+      });
+      const plan = buildRefinementPlan(candidates);
+      const llmOutput = await buildClient(settings).chat(
+        `${toMarkdownPlan(plan)}
+
+${prompt}`,
+        buildPatchPlanSystemPrompt()
+      );
+      const fileContents = /* @__PURE__ */ new Map([[file.path, content]]);
+      const preview = buildRefinementPreview(llmOutput, fileContents, candidates);
+      const md = toMarkdownRefinementPreview(preview);
+      await ctx.writeAssistantOutput("Refinement Log", md);
+      const editCount = preview.singleFilePreviews.reduce(
+        (sum, p) => sum + p.preview.summary.totalEdits,
+        0
+      );
+      new import_obsidian5.Notice(`AI Copilot: preview logged \u2014 ${editCount} edit(s) proposed.`);
+    }
+  });
+  ctx.addCommand({
+    id: "ai-copilot-smart-apply-safe",
+    name: "AI Copilot: Auto-apply safe refinement edits",
+    callback: async () => {
+      const file = ctx.app.workspace.getActiveFile();
+      if (!file) return void new import_obsidian5.Notice("No active note selected.");
+      const content = await ctx.app.vault.read(file);
+      const settings = ctx.getSettings();
+      new import_obsidian5.Notice("AI Copilot: analyzing note for safe edits\u2026");
+      const candidates = [{ path: file.path, content }];
+      const prompt = buildRefinementPrompt(candidates, {
+        enableWebEnrichment: settings.enableWebEnrichment
+      });
+      const plan = buildRefinementPlan(candidates);
+      const llmOutput = await buildClient(settings).chat(
+        `${toMarkdownPlan(plan)}
+
+${prompt}`,
+        buildPatchPlanSystemPrompt()
+      );
+      const fileContents = /* @__PURE__ */ new Map([[file.path, content]]);
+      const preview = buildRefinementPreview(llmOutput, fileContents, candidates);
+      const decision = buildSafeAutoApplyDecision(preview);
+      const totalSafe = (decision.singleFileSelections ?? []).reduce(
+        (sum, s) => sum + (s.selectedEditIndices?.length ?? 0),
+        0
+      );
+      if (totalSafe === 0) {
+        await ctx.writeAssistantOutput("Refinement Log", toMarkdownRefinementPreview(preview));
+        return void new import_obsidian5.Notice("AI Copilot: no safe edits to apply. Preview logged.");
       }
-      const preview = previewPatchPlan(content, plan);
-      await ctx.writeAssistantOutput("Refinement Log", toMarkdownPatchPlanPreview(preview));
-      new import_obsidian5.Notice(`AI Copilot: patch preview logged (${preview.summary.appliedEdits}/${preview.summary.totalEdits} edits).`);
+      const { result, snapshot } = applyRefinementDecision(preview, decision, fileContents);
+      for (const sr of result.singleFileResults) {
+        if (sr.applied.transactions.some((t) => t.applied)) {
+          const f = ctx.app.vault.getAbstractFileByPath(sr.path);
+          if (f instanceof import_obsidian5.TFile) await ctx.app.vault.modify(f, sr.applied.finalContent);
+        }
+      }
+      ctx.setLastRefinementSnapshot(snapshot);
+      await ctx.writeAssistantOutput(
+        "Refinement Log",
+        `## Smart Apply (safe only)
+${result.summary}
+
+${toMarkdownRefinementPreview(preview)}`
+      );
+      new import_obsidian5.Notice(`AI Copilot: applied ${totalSafe} safe edit(s).`);
+    }
+  });
+  ctx.addCommand({
+    id: "ai-copilot-rollback-smart-refinement",
+    name: "AI Copilot: Roll back last smart refinement",
+    callback: async () => {
+      const snapshot = ctx.getLastRefinementSnapshot();
+      if (!snapshot) return void new import_obsidian5.Notice("No smart refinement snapshot available for rollback.");
+      const rollbackContents = buildRollbackContents(snapshot);
+      let restored = 0;
+      for (const [path, original] of rollbackContents) {
+        const f = ctx.app.vault.getAbstractFileByPath(path);
+        if (f instanceof import_obsidian5.TFile) {
+          await ctx.app.vault.modify(f, original);
+          restored++;
+        }
+      }
+      ctx.clearLastRefinementSnapshot();
+      new import_obsidian5.Notice(`AI Copilot: rolled back ${restored} file(s) to pre-refinement state.`);
     }
   });
   ctx.addCommand({
@@ -1951,7 +2343,7 @@ ${summary}`);
     }
   });
 }
-async function runRefinementFlow(candidates, settings, setLastPatchState, app, writeAssistantOutput) {
+async function runRefinementFlow(candidates, settings, setLastPatchState, app, writeAssistantOutput, setLastRefinementSnapshot) {
   if (!candidates.length) return void new import_obsidian5.Notice("AI Copilot: no recent notes to refine.");
   const plan = buildRefinementPlan(candidates);
   const prompt = buildRefinementPrompt(candidates, {
@@ -1961,47 +2353,37 @@ async function runRefinementFlow(candidates, settings, setLastPatchState, app, w
     `${toMarkdownPlan(plan)}
 
 ${prompt}`,
-    "You refine markdown notes and preserve intent."
+    buildPatchPlanSystemPrompt()
   );
-  const todos = candidates.flatMap((n) => extractTodos(n.content));
-  if (settings.refinementAutoApply && candidates[0]) {
-    const c = candidates[0];
-    const patchPlan = {
-      path: c.path,
-      title: "Auto-normalize spacing",
-      edits: [{ find: "  ", replace: " ", reason: "normalize spacing", replaceAll: true }]
-    };
-    if (validatePatchPlan(patchPlan).valid) {
-      const applied = applyPatchPlan(c.content, patchPlan);
-      if (applied.transactions.some((tx) => tx.applied)) {
-        const file = app.vault.getAbstractFileByPath(c.path);
-        if (file instanceof import_obsidian5.TFile) {
-          await app.vault.modify(file, applied.finalContent);
-          setLastPatchState(applied.transactions, c.path);
+  const fileContents = new Map(candidates.map((c) => [c.path, c.content]));
+  const preview = buildRefinementPreview(output, fileContents, candidates);
+  if (settings.refinementAutoApply) {
+    const decision = buildSafeAutoApplyDecision(preview);
+    const totalSafe = (decision.singleFileSelections ?? []).reduce(
+      (sum, s) => sum + (s.selectedEditIndices?.length ?? 0),
+      0
+    );
+    if (totalSafe > 0) {
+      const { result, snapshot } = applyRefinementDecision(preview, decision, fileContents);
+      for (const sr of result.singleFileResults) {
+        if (sr.applied.transactions.some((t) => t.applied)) {
+          const file = app.vault.getAbstractFileByPath(sr.path);
+          if (file instanceof import_obsidian5.TFile) {
+            await app.vault.modify(file, sr.applied.finalContent);
+            setLastPatchState(sr.applied.transactions, sr.path);
+          }
         }
       }
-    } else {
-      const { finalContent, transactions } = applyPatchSet(c.content, [
-        {
-          path: c.path,
-          find: "  ",
-          replace: " ",
-          reason: "normalize spacing"
-        }
-      ]);
-      if (transactions.some((tx) => tx.applied)) {
-        const file = app.vault.getAbstractFileByPath(c.path);
-        if (file instanceof import_obsidian5.TFile) {
-          await app.vault.modify(file, finalContent);
-          setLastPatchState(transactions, c.path);
-        }
-      }
+      if (setLastRefinementSnapshot) setLastRefinementSnapshot(snapshot);
     }
   }
-  new import_obsidian5.Notice(`AI Copilot: scanned ${candidates.length} notes \xB7 TODOs ${todos.length}`);
+  const md = toMarkdownRefinementPreview(preview);
+  new import_obsidian5.Notice(`AI Copilot: scanned ${candidates.length} notes \xB7 TODOs ${preview.todoCount}`);
   await writeAssistantOutput("Refinement Log", `${toMarkdownPlan(plan)}
 
-## LLM Output
+${md}
+
+## Raw LLM Output
 ${output}`);
 }
 
@@ -2013,6 +2395,7 @@ var AICopilotPlugin = class extends import_obsidian6.Plugin {
     this.intervalId = null;
     this.lastPatchTransactions = [];
     this.lastPatchTargetPath = null;
+    this.lastRefinementSnapshot = null;
     this.indexing = new IndexingOrchestrator(this.app, () => this.settings);
     this.retrieval = new RetrievalOrchestrator({
       getAllNotes: () => this.indexing.getAllNotes(),
@@ -2049,6 +2432,13 @@ var AICopilotPlugin = class extends import_obsidian6.Plugin {
           this.lastPatchTargetPath = null;
         },
         getLastPatchState: () => ({ transactions: this.lastPatchTransactions, path: this.lastPatchTargetPath }),
+        setLastRefinementSnapshot: (snapshot) => {
+          this.lastRefinementSnapshot = snapshot;
+        },
+        clearLastRefinementSnapshot: () => {
+          this.lastRefinementSnapshot = null;
+        },
+        getLastRefinementSnapshot: () => this.lastRefinementSnapshot,
         writeAssistantOutput: (name, body) => this.writeAssistantOutput(name, body),
         runRefinementPass: () => this.runRefinementPass()
       },
@@ -2090,7 +2480,10 @@ var AICopilotPlugin = class extends import_obsidian6.Plugin {
         this.lastPatchTargetPath = path;
       },
       this.app,
-      (name, body) => this.writeAssistantOutput(name, body)
+      (name, body) => this.writeAssistantOutput(name, body),
+      (snapshot) => {
+        this.lastRefinementSnapshot = snapshot;
+      }
     );
   }
   async rollbackLastPatchFromCurrentContent(current) {
