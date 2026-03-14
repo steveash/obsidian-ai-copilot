@@ -3,9 +3,15 @@ import { PluginSettingTab, Setting } from "obsidian";
 import type AICopilotPlugin from "./main";
 
 export interface AICopilotSettings {
-  provider: "openai" | "none";
+  provider: "openai" | "anthropic" | "bedrock" | "none";
   openaiApiKey: string;
   openaiModel: string;
+  anthropicApiKey: string;
+  anthropicModel: string;
+  bedrockAccessKeyId: string;
+  bedrockSecretAccessKey: string;
+  bedrockRegion: string;
+  bedrockModel: string;
   chatMaxResults: number;
   refinementIntervalMinutes: number;
   refinementLookbackDays: number;
@@ -32,6 +38,12 @@ export const DEFAULT_SETTINGS: AICopilotSettings = {
   provider: "none",
   openaiApiKey: "",
   openaiModel: "gpt-4o-mini",
+  anthropicApiKey: "",
+  anthropicModel: "claude-sonnet-4-6-20250514",
+  bedrockAccessKeyId: "",
+  bedrockSecretAccessKey: "",
+  bedrockRegion: "us-west-2",
+  bedrockModel: "us.anthropic.claude-sonnet-4-6-20250514-v1:0",
   chatMaxResults: 6,
   refinementIntervalMinutes: 120,
   refinementLookbackDays: 3,
@@ -55,7 +67,8 @@ export const DEFAULT_SETTINGS: AICopilotSettings = {
 };
 
 function parseProvider(value: string): AICopilotSettings["provider"] {
-  return value === "openai" ? "openai" : "none";
+  if (value === "openai" || value === "anthropic" || value === "bedrock") return value;
+  return "none";
 }
 
 function parseRerankerType(value: string): AICopilotSettings["rerankerType"] {
@@ -83,6 +96,8 @@ export class AICopilotSettingTab extends PluginSettingTab {
         d
           .addOption("none", "None (dry-run)")
           .addOption("openai", "OpenAI")
+          .addOption("anthropic", "Anthropic")
+          .addOption("bedrock", "AWS Bedrock")
           .setValue(this.plugin.settings.provider)
           .onChange(async (value: string) => {
             this.plugin.settings.provider = parseProvider(value);
@@ -109,6 +124,75 @@ export class AICopilotSettingTab extends PluginSettingTab {
       .addText((t) =>
         t.setValue(this.plugin.settings.openaiModel).onChange(async (value) => {
           this.plugin.settings.openaiModel = value.trim() || "gpt-4o-mini";
+          await this.plugin.saveSettings();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Anthropic API key")
+      .setDesc("Stored locally in Obsidian plugin data.")
+      .addText((t) =>
+        t
+          .setPlaceholder("sk-ant-...")
+          .setValue(this.plugin.settings.anthropicApiKey)
+          .onChange(async (value) => {
+            this.plugin.settings.anthropicApiKey = value.trim();
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Anthropic model")
+      .setDesc("Model used when provider is Anthropic")
+      .addText((t) =>
+        t.setValue(this.plugin.settings.anthropicModel).onChange(async (value) => {
+          this.plugin.settings.anthropicModel = value.trim() || "claude-sonnet-4-6-20250514";
+          await this.plugin.saveSettings();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Bedrock AWS access key ID")
+      .setDesc("AWS access key for Bedrock API calls")
+      .addText((t) =>
+        t
+          .setPlaceholder("AKIA...")
+          .setValue(this.plugin.settings.bedrockAccessKeyId)
+          .onChange(async (value) => {
+            this.plugin.settings.bedrockAccessKeyId = value.trim();
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Bedrock AWS secret access key")
+      .setDesc("Stored locally in Obsidian plugin data.")
+      .addText((t) =>
+        t
+          .setPlaceholder("secret...")
+          .setValue(this.plugin.settings.bedrockSecretAccessKey)
+          .onChange(async (value) => {
+            this.plugin.settings.bedrockSecretAccessKey = value.trim();
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Bedrock AWS region")
+      .setDesc("AWS region for Bedrock runtime endpoint")
+      .addText((t) =>
+        t.setValue(this.plugin.settings.bedrockRegion).onChange(async (value) => {
+          this.plugin.settings.bedrockRegion = value.trim() || "us-west-2";
+          await this.plugin.saveSettings();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Bedrock model")
+      .setDesc("Bedrock model ID (e.g. us.anthropic.claude-sonnet-4-6-20250514-v1:0)")
+      .addText((t) =>
+        t.setValue(this.plugin.settings.bedrockModel).onChange(async (value) => {
+          this.plugin.settings.bedrockModel = value.trim() || "us.anthropic.claude-sonnet-4-6-20250514-v1:0";
           await this.plugin.saveSettings();
         })
       );

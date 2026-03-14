@@ -1,5 +1,7 @@
 const API_KEY_PATTERNS = [
   /sk-[A-Za-z0-9]{20,}/g,
+  /sk-ant-[A-Za-z0-9\-_]{20,}/g,
+  /AKIA[A-Z0-9]{16}/g,
   /api[_-]?key\s*[:=]\s*["']?[A-Za-z0-9_\-]{16,}["']?/gi
 ];
 

@@ -241,6 +241,8 @@ init_patch_plan();
 // src/safety.ts
 var API_KEY_PATTERNS = [
   /sk-[A-Za-z0-9]{20,}/g,
+  /sk-ant-[A-Za-z0-9\-_]{20,}/g,
+  /AKIA[A-Z0-9]{16}/g,
   /api[_-]?key\s*[:=]\s*["']?[A-Za-z0-9_\-]{16,}["']?/gi
 ];
 function redactSensitive(input) {
@@ -257,6 +259,12 @@ var DEFAULT_SETTINGS = {
   provider: "none",
   openaiApiKey: "",
   openaiModel: "gpt-4o-mini",
+  anthropicApiKey: "",
+  anthropicModel: "claude-sonnet-4-6-20250514",
+  bedrockAccessKeyId: "",
+  bedrockSecretAccessKey: "",
+  bedrockRegion: "us-west-2",
+  bedrockModel: "us.anthropic.claude-sonnet-4-6-20250514-v1:0",
   chatMaxResults: 6,
   refinementIntervalMinutes: 120,
   refinementLookbackDays: 3,
@@ -279,7 +287,8 @@ var DEFAULT_SETTINGS = {
   strictConfigValidation: true
 };
 function parseProvider(value) {
-  return value === "openai" ? "openai" : "none";
+  if (value === "openai" || value === "anthropic" || value === "bedrock") return value;
+  return "none";
 }
 function parseRerankerType(value) {
   return value === "openai" ? "openai" : "heuristic";
@@ -294,7 +303,7 @@ var AICopilotSettingTab = class extends import_obsidian.PluginSettingTab {
     containerEl.empty();
     containerEl.createEl("h2", { text: "AI Copilot Settings" });
     new import_obsidian.Setting(containerEl).setName("Provider").setDesc("LLM provider used by chat + refinement").addDropdown(
-      (d) => d.addOption("none", "None (dry-run)").addOption("openai", "OpenAI").setValue(this.plugin.settings.provider).onChange(async (value) => {
+      (d) => d.addOption("none", "None (dry-run)").addOption("openai", "OpenAI").addOption("anthropic", "Anthropic").addOption("bedrock", "AWS Bedrock").setValue(this.plugin.settings.provider).onChange(async (value) => {
         this.plugin.settings.provider = parseProvider(value);
         await this.plugin.saveSettings();
       })
@@ -308,6 +317,42 @@ var AICopilotSettingTab = class extends import_obsidian.PluginSettingTab {
     new import_obsidian.Setting(containerEl).setName("OpenAI model").setDesc("Model used for note chat and refinement").addText(
       (t) => t.setValue(this.plugin.settings.openaiModel).onChange(async (value) => {
         this.plugin.settings.openaiModel = value.trim() || "gpt-4o-mini";
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian.Setting(containerEl).setName("Anthropic API key").setDesc("Stored locally in Obsidian plugin data.").addText(
+      (t) => t.setPlaceholder("sk-ant-...").setValue(this.plugin.settings.anthropicApiKey).onChange(async (value) => {
+        this.plugin.settings.anthropicApiKey = value.trim();
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian.Setting(containerEl).setName("Anthropic model").setDesc("Model used when provider is Anthropic").addText(
+      (t) => t.setValue(this.plugin.settings.anthropicModel).onChange(async (value) => {
+        this.plugin.settings.anthropicModel = value.trim() || "claude-sonnet-4-6-20250514";
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian.Setting(containerEl).setName("Bedrock AWS access key ID").setDesc("AWS access key for Bedrock API calls").addText(
+      (t) => t.setPlaceholder("AKIA...").setValue(this.plugin.settings.bedrockAccessKeyId).onChange(async (value) => {
+        this.plugin.settings.bedrockAccessKeyId = value.trim();
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian.Setting(containerEl).setName("Bedrock AWS secret access key").setDesc("Stored locally in Obsidian plugin data.").addText(
+      (t) => t.setPlaceholder("secret...").setValue(this.plugin.settings.bedrockSecretAccessKey).onChange(async (value) => {
+        this.plugin.settings.bedrockSecretAccessKey = value.trim();
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian.Setting(containerEl).setName("Bedrock AWS region").setDesc("AWS region for Bedrock runtime endpoint").addText(
+      (t) => t.setValue(this.plugin.settings.bedrockRegion).onChange(async (value) => {
+        this.plugin.settings.bedrockRegion = value.trim() || "us-west-2";
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian.Setting(containerEl).setName("Bedrock model").setDesc("Bedrock model ID (e.g. us.anthropic.claude-sonnet-4-6-20250514-v1:0)").addText(
+      (t) => t.setValue(this.plugin.settings.bedrockModel).onChange(async (value) => {
+        this.plugin.settings.bedrockModel = value.trim() || "us.anthropic.claude-sonnet-4-6-20250514-v1:0";
         await this.plugin.saveSettings();
       })
     );
@@ -445,6 +490,11 @@ var AICopilotSettingTab = class extends import_obsidian.PluginSettingTab {
 function validateSettings(input) {
   const issues = [];
   if (input.provider === "openai" && !input.openaiApiKey) issues.push("OpenAI provider requires an API key.");
+  if (input.provider === "anthropic" && !input.anthropicApiKey) issues.push("Anthropic provider requires an API key.");
+  if (input.provider === "bedrock" && (!input.bedrockAccessKeyId || !input.bedrockSecretAccessKey)) {
+    issues.push("Bedrock provider requires AWS access key ID and secret access key.");
+  }
+  if (input.provider === "bedrock" && !input.bedrockRegion) issues.push("Bedrock provider requires an AWS region.");
   const weights = input.retrievalLexicalWeight + input.retrievalSemanticWeight + input.retrievalFreshnessWeight;
   if (weights > 1.5) issues.push("Retrieval weight sum is too high; expected <= 1.5.");
   if (input.maxPromptChars < 2e3 || input.maxPromptChars > 1e5) {
@@ -1183,9 +1233,150 @@ var OpenAIClient = class {
     return json.choices?.[0]?.message?.content?.trim() || "";
   }
 };
+var AnthropicClient = class {
+  constructor(settings) {
+    this.settings = settings;
+  }
+  async chat(prompt, system = "You are a helpful note assistant.") {
+    if (!this.settings.allowRemoteModels) {
+      throw new Error("Remote model calls are disabled in settings");
+    }
+    if (!this.settings.anthropicApiKey) {
+      throw new Error("Anthropic API key missing in plugin settings");
+    }
+    const boundedPrompt = prompt.slice(0, this.settings.maxPromptChars);
+    const response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": this.settings.anthropicApiKey,
+        "anthropic-version": "2023-06-01"
+      },
+      body: JSON.stringify({
+        model: this.settings.anthropicModel,
+        max_tokens: 4096,
+        system,
+        messages: [{ role: "user", content: boundedPrompt }]
+      })
+    });
+    if (!response.ok) {
+      const detail = await response.text();
+      throw new Error(`Anthropic request failed: ${response.status} ${detail}`);
+    }
+    const json = await response.json();
+    return json.content?.find((b) => b.type === "text")?.text?.trim() || "";
+  }
+};
+var BedrockClient = class {
+  constructor(settings) {
+    this.settings = settings;
+  }
+  /** AWS Signature V4 signing for Bedrock invoke requests. */
+  async sign(method, url, body, timestamp) {
+    const region = this.settings.bedrockRegion;
+    const accessKey = this.settings.bedrockAccessKeyId;
+    const secretKey = this.settings.bedrockSecretAccessKey;
+    const service = "bedrock";
+    const dateStamp = timestamp.slice(0, 8);
+    const enc = new TextEncoder();
+    async function hmac(key, data) {
+      const cryptoKey = await crypto.subtle.importKey(
+        "raw",
+        key instanceof ArrayBuffer ? new Uint8Array(key) : key,
+        { name: "HMAC", hash: "SHA-256" },
+        false,
+        ["sign"]
+      );
+      return crypto.subtle.sign("HMAC", cryptoKey, enc.encode(data));
+    }
+    async function sha256(data) {
+      const digest = await crypto.subtle.digest("SHA-256", enc.encode(data));
+      return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+    }
+    const payloadHash = await sha256(body);
+    const host = url.hostname;
+    const canonicalUri = url.pathname;
+    const canonicalQuerystring = "";
+    const signedHeaders = "content-type;host;x-amz-date";
+    const canonicalHeaders = `content-type:application/json
+host:${host}
+x-amz-date:${timestamp}
+`;
+    const canonicalRequest = [
+      method,
+      canonicalUri,
+      canonicalQuerystring,
+      canonicalHeaders,
+      signedHeaders,
+      payloadHash
+    ].join("\n");
+    const credentialScope = `${dateStamp}/${region}/${service}/aws4_request`;
+    const stringToSign = [
+      "AWS4-HMAC-SHA256",
+      timestamp,
+      credentialScope,
+      await sha256(canonicalRequest)
+    ].join("\n");
+    const kDate = await hmac(enc.encode("AWS4" + secretKey), dateStamp);
+    const kRegion = await hmac(kDate, region);
+    const kService = await hmac(kRegion, service);
+    const kSigning = await hmac(kService, "aws4_request");
+    const signatureBuffer = await hmac(kSigning, stringToSign);
+    const signature = [...new Uint8Array(signatureBuffer)].map((b) => b.toString(16).padStart(2, "0")).join("");
+    const authorization = `AWS4-HMAC-SHA256 Credential=${accessKey}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
+    return {
+      "Content-Type": "application/json",
+      "X-Amz-Date": timestamp,
+      Authorization: authorization
+    };
+  }
+  async chat(prompt, system = "You are a helpful note assistant.") {
+    if (!this.settings.allowRemoteModels) {
+      throw new Error("Remote model calls are disabled in settings");
+    }
+    if (!this.settings.bedrockAccessKeyId || !this.settings.bedrockSecretAccessKey) {
+      throw new Error("AWS Bedrock credentials missing in plugin settings");
+    }
+    const boundedPrompt = prompt.slice(0, this.settings.maxPromptChars);
+    const region = this.settings.bedrockRegion;
+    const model = this.settings.bedrockModel;
+    const body = JSON.stringify({
+      anthropic_version: "bedrock-2023-05-31",
+      max_tokens: 4096,
+      system,
+      messages: [{ role: "user", content: boundedPrompt }]
+    });
+    const url = new URL(
+      `https://bedrock-runtime.${region}.amazonaws.com/model/${model}/invoke`
+    );
+    const now = /* @__PURE__ */ new Date();
+    const timestamp = now.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
+    const headers = await this.sign("POST", url, body, timestamp);
+    const response = await fetch(url.toString(), {
+      method: "POST",
+      headers,
+      body
+    });
+    if (!response.ok) {
+      const detail = await response.text();
+      throw new Error(`Bedrock request failed: ${response.status} ${detail}`);
+    }
+    const json = await response.json();
+    return json.content?.find((b) => b.type === "text")?.text?.trim() || "";
+  }
+};
 function buildClient(settings) {
-  if (settings.provider === "openai" && settings.allowRemoteModels) return new OpenAIClient(settings);
-  return new DryRunClient();
+  if (!settings.allowRemoteModels) return new DryRunClient();
+  switch (settings.provider) {
+    case "openai":
+      return new OpenAIClient(settings);
+    case "anthropic":
+      return new AnthropicClient(settings);
+    case "bedrock":
+      return new BedrockClient(settings);
+    default:
+      return new DryRunClient();
+  }
 }
 
 // src/chat.ts

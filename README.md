@@ -89,17 +89,53 @@ cp manifest.json main.js styles.css "<VAULT>/.obsidian/plugins/obsidian-ai-copil
 
 ## First-run configuration (API key + models)
 
-In Obsidian plugin settings (**AI Copilot Settings**):
+In Obsidian plugin settings (**AI Copilot Settings**), choose a provider and configure its credentials:
+
+### OpenAI
 
 1. Set **Provider** to `openai`
-2. Paste **OpenAI API key**
+2. Paste **OpenAI API key** (`sk-...`)
 3. Optionally tune:
    - OpenAI chat model (`gpt-4o-mini` default)
    - embedding model (`text-embedding-3-large` default)
    - reranker model (`gpt-4.1-mini` default)
-4. Run **AI Copilot: Rebuild persistent vector index** once after initial enablement (or after major vault changes)
 
-If no key is configured, set provider to `none` for dry-run/local behavior.
+### Anthropic
+
+1. Set **Provider** to `anthropic`
+2. Paste **Anthropic API key** (`sk-ant-...`)
+3. Optionally change model (default: `claude-sonnet-4-6-20250514`)
+
+### AWS Bedrock
+
+1. Set **Provider** to `bedrock`
+2. Enter **AWS access key ID** (`AKIA...`) and **secret access key**
+3. Set **AWS region** (default: `us-west-2`)
+4. Set **Bedrock model ID** (default: `us.anthropic.claude-sonnet-4-6-20250514-v1:0`)
+
+> **Bedrock model ID nuance:** Bedrock model IDs differ from Anthropic API model names. They use the format `us.anthropic.<model>-v1:0` (region-prefixed, versioned). Check the [AWS Bedrock model IDs documentation](https://docs.aws.amazon.com/bedrock/latest/userguide/models-supported.html) for the exact ID for your target model and region. Cross-region inference IDs (e.g. `us.anthropic.…`) are recommended for availability.
+
+### Dry-run / no provider
+
+Set provider to `none` for local dry-run behavior with no API calls.
+
+---
+
+After configuring a provider, run **AI Copilot: Rebuild persistent vector index** once after initial enablement (or after major vault changes).
+
+### Environment variables (.env)
+
+For development, credentials can also be set via `.env` at the project root:
+
+```
+OPENAI_API_KEY=sk-...
+ANTHROPIC_API_KEY=sk-ant-...
+AWS_ACCESS_KEY_ID=AKIA...
+AWS_SECRET_ACCESS_KEY=...
+AWS_REGION=us-west-2
+```
+
+These are used for local testing; the plugin itself reads credentials from Obsidian's plugin settings storage.
 
 ---
 
