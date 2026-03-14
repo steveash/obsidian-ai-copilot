@@ -1,4 +1,4 @@
-import { Notice, TFile } from "obsidian";
+import { type App, type Command, Notice, TFile } from "obsidian";
 import { toMarkdownPlan } from "./planner";
 import { buildRefinementPrompt, extractTodos } from "./refinement";
 import { applyPatchSet, type PatchTransaction } from "./patcher";
@@ -13,11 +13,12 @@ import { buildClient } from "./llm";
 import type { ChatOrchestrator } from "./chat-orchestrator";
 import type { IndexingOrchestrator } from "./indexing-orchestrator";
 import { buildRefinementPlan } from "./planner";
+import type { AICopilotSettings } from "./settings";
 
 export interface CommandContext {
-  addCommand: (command: any) => void;
-  app: any;
-  getSettings: () => any;
+  addCommand: (command: Command) => void;
+  app: App;
+  getSettings: () => AICopilotSettings;
   setLastPatchState: (transactions: PatchTransaction[], path: string) => void;
   clearLastPatchState: () => void;
   getLastPatchState: () => { transactions: PatchTransaction[]; path: string | null };
@@ -140,9 +141,9 @@ export function registerPluginCommands(
 
 export async function runRefinementFlow(
   candidates: Array<{ path: string; content: string }>,
-  settings: any,
+  settings: AICopilotSettings,
   setLastPatchState: (transactions: PatchTransaction[], path: string) => void,
-  app: any,
+  app: App,
   writeAssistantOutput: (name: string, body: string) => Promise<void>
 ) {
   if (!candidates.length) return void new Notice("AI Copilot: no recent notes to refine.");

@@ -94,7 +94,8 @@ export class RetrievalOrchestrator {
             .slice(0, settings.rerankerTopK)
             .map((x, i) => ({ id: `${i}:${x.path}`, text: `${x.path}\n${x.content}`, score: x.score }))
         );
-      } catch {
+      } catch (err) {
+        console.warn("AI Copilot: reranker failed, falling back to heuristic:", err);
         reranker = new HeuristicReranker();
         reranked = await reranker.rerank(
           query,

@@ -83,7 +83,11 @@ export default class AICopilotPlugin extends Plugin {
   private startRefinementLoop() {
     if (this.intervalId) window.clearInterval(this.intervalId);
     const intervalMs = Math.max(15, this.settings.refinementIntervalMinutes) * 60_000;
-    this.intervalId = window.setInterval(() => void this.runRefinementPass(), intervalMs);
+    this.intervalId = window.setInterval(() => {
+      this.runRefinementPass().catch((err) => {
+        console.error("AI Copilot refinement pass failed:", err);
+      });
+    }, intervalMs);
     this.registerInterval(this.intervalId);
   }
 

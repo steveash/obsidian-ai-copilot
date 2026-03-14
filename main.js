@@ -240,9 +240,11 @@ init_patch_plan();
 
 // src/safety.ts
 var API_KEY_PATTERNS = [
-  /sk-[A-Za-z0-9]{20,}/g,
   /sk-ant-[A-Za-z0-9\-_]{20,}/g,
+  /sk-[A-Za-z0-9]{20,}/g,
   /AKIA[A-Z0-9]{16}/g,
+  /(?:aws_?secret_?access_?key|secret_?key)\s*[:=]\s*["']?[A-Za-z0-9/+=]{20,}["']?/gi,
+  /Bearer\s+[A-Za-z0-9\-._~+/]+=*/g,
   /api[_-]?key\s*[:=]\s*["']?[A-Za-z0-9_\-]{16,}["']?/gi
 ];
 function redactSensitive(input) {
@@ -821,7 +823,12 @@ var OpenAIReranker = class {
     }
     const json = await res.json();
     const content = json.choices?.[0]?.message?.content || "{}";
-    const parsed = JSON.parse(content);
+    let parsed;
+    try {
+      parsed = JSON.parse(content);
+    } catch {
+      throw new Error(`Reranker returned invalid JSON: ${content.slice(0, 200)}`);
+    }
     const scored = [...candidates];
     for (const r of parsed.ranked ?? []) {
       if (r.idx >= 0 && r.idx < scored.length) {
@@ -894,7 +901,8 @@ var RetrievalOrchestrator = class {
           final.slice(0, settings.rerankerTopK).map((x, i) => ({ id: `${i}:${x.path}`, text: `${x.path}
 ${x.content}`, score: x.score }))
         );
-      } catch {
+      } catch (err) {
+        console.warn("AI Copilot: reranker failed, falling back to heuristic:", err);
         reranker = new HeuristicReranker();
         reranked = await reranker.rerank(
           query,
@@ -1041,6 +1049,7 @@ var PersistentVectorIndex = class {
   }
   async getOrCreate(id, path, content, model, mtime) {
     await this.ensureLoaded();
+    if (!this.cache) throw new Error("Vector cache failed to initialize");
     const hash = contentHash(content);
     const rec = this.cache.records[id];
     if (rec && rec.contentHash === hash && rec.model === model) return rec.vector;
@@ -1068,6 +1077,7 @@ var PersistentVectorIndex = class {
   }
   async removePath(path) {
     await this.ensureLoaded();
+    if (!this.cache) throw new Error("Vector cache failed to initialize");
     for (const key of Object.keys(this.cache.records)) {
       if (this.cache.records[key].path === path) delete this.cache.records[key];
     }
@@ -1226,7 +1236,7 @@ var OpenAIClient = class {
       })
     });
     if (!response.ok) {
-      const detail = await response.text();
+      const detail = redactSensitive(await response.text());
       throw new Error(`OpenAI request failed: ${response.status} ${detail}`);
     }
     const json = await response.json();
@@ -1260,7 +1270,7 @@ var AnthropicClient = class {
       })
     });
     if (!response.ok) {
-      const detail = await response.text();
+      const detail = redactSensitive(await response.text());
       throw new Error(`Anthropic request failed: ${response.status} ${detail}`);
     }
     const json = await response.json();
@@ -1358,7 +1368,7 @@ x-amz-date:${timestamp}
       body
     });
     if (!response.ok) {
-      const detail = await response.text();
+      const detail = redactSensitive(await response.text());
       throw new Error(`Bedrock request failed: ${response.status} ${detail}`);
     }
     const json = await response.json();
@@ -1864,7 +1874,11 @@ var AICopilotPlugin = class extends import_obsidian6.Plugin {
   startRefinementLoop() {
     if (this.intervalId) window.clearInterval(this.intervalId);
     const intervalMs = Math.max(15, this.settings.refinementIntervalMinutes) * 6e4;
-    this.intervalId = window.setInterval(() => void this.runRefinementPass(), intervalMs);
+    this.intervalId = window.setInterval(() => {
+      this.runRefinementPass().catch((err) => {
+        console.error("AI Copilot refinement pass failed:", err);
+      });
+    }, intervalMs);
     this.registerInterval(this.intervalId);
   }
   async runRefinementPass() {

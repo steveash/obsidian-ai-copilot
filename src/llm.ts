@@ -1,4 +1,5 @@
 import type { AICopilotSettings } from "./settings";
+import { redactSensitive } from "./safety";
 
 export interface LLMClient {
   chat(prompt: string, system?: string): Promise<string>;
@@ -40,7 +41,7 @@ export class OpenAIClient implements LLMClient {
     });
 
     if (!response.ok) {
-      const detail = await response.text();
+      const detail = redactSensitive(await response.text());
       throw new Error(`OpenAI request failed: ${response.status} ${detail}`);
     }
 
@@ -81,7 +82,7 @@ export class AnthropicClient implements LLMClient {
     });
 
     if (!response.ok) {
-      const detail = await response.text();
+      const detail = redactSensitive(await response.text());
       throw new Error(`Anthropic request failed: ${response.status} ${detail}`);
     }
 
@@ -212,7 +213,7 @@ export class BedrockClient implements LLMClient {
     });
 
     if (!response.ok) {
-      const detail = await response.text();
+      const detail = redactSensitive(await response.text());
       throw new Error(`Bedrock request failed: ${response.status} ${detail}`);
     }
 

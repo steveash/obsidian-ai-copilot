@@ -68,7 +68,12 @@ export class OpenAIReranker implements Reranker {
 
     const json = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
     const content = json.choices?.[0]?.message?.content || "{}";
-    const parsed = JSON.parse(content) as { ranked?: Array<{ idx: number; relevance: number }> };
+    let parsed: { ranked?: Array<{ idx: number; relevance: number }> };
+    try {
+      parsed = JSON.parse(content);
+    } catch {
+      throw new Error(`Reranker returned invalid JSON: ${content.slice(0, 200)}`);
+    }
 
     const scored = [...candidates];
     for (const r of parsed.ranked ?? []) {

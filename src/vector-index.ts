@@ -69,12 +69,13 @@ export class PersistentVectorIndex {
 
   async getOrCreate(id: string, path: string, content: string, model: string, mtime?: number): Promise<number[]> {
     await this.ensureLoaded();
+    if (!this.cache) throw new Error("Vector cache failed to initialize");
     const hash = contentHash(content);
-    const rec = this.cache!.records[id];
+    const rec = this.cache.records[id];
     if (rec && rec.contentHash === hash && rec.model === model) return rec.vector;
 
     const vector = await this.provider.embed(content, model);
-    this.cache!.records[id] = {
+    this.cache.records[id] = {
       id,
       path,
       chunkId: id.includes("#") ? id : undefined,
@@ -85,7 +86,7 @@ export class PersistentVectorIndex {
       mtime,
       textPreview: content.slice(0, 180)
     };
-    await this.storage.save(this.cache!);
+    await this.storage.save(this.cache);
     return vector;
   }
 
@@ -99,10 +100,11 @@ export class PersistentVectorIndex {
 
   async removePath(path: string): Promise<void> {
     await this.ensureLoaded();
-    for (const key of Object.keys(this.cache!.records)) {
-      if (this.cache!.records[key].path === path) delete this.cache!.records[key];
+    if (!this.cache) throw new Error("Vector cache failed to initialize");
+    for (const key of Object.keys(this.cache.records)) {
+      if (this.cache.records[key].path === path) delete this.cache.records[key];
     }
-    await this.storage.save(this.cache!);
+    await this.storage.save(this.cache);
   }
 
   async rebuild(chunks: Array<{ id: string; path: string; content: string; mtime?: number }>, model: string): Promise<number> {
