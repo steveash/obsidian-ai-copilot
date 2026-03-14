@@ -260,11 +260,11 @@ var DEFAULT_SETTINGS = {
   openaiApiKey: "",
   openaiModel: "gpt-4o-mini",
   anthropicApiKey: "",
-  anthropicModel: "claude-sonnet-4-6-20250514",
+  anthropicModel: "claude-sonnet-4-6",
   bedrockAccessKeyId: "",
   bedrockSecretAccessKey: "",
   bedrockRegion: "us-west-2",
-  bedrockModel: "us.anthropic.claude-sonnet-4-6-20250514-v1:0",
+  bedrockModel: "us.anthropic.claude-sonnet-4-20250514-v1:0",
   chatMaxResults: 6,
   refinementIntervalMinutes: 120,
   refinementLookbackDays: 3,
@@ -328,7 +328,7 @@ var AICopilotSettingTab = class extends import_obsidian.PluginSettingTab {
     );
     new import_obsidian.Setting(containerEl).setName("Anthropic model").setDesc("Model used when provider is Anthropic").addText(
       (t) => t.setValue(this.plugin.settings.anthropicModel).onChange(async (value) => {
-        this.plugin.settings.anthropicModel = value.trim() || "claude-sonnet-4-6-20250514";
+        this.plugin.settings.anthropicModel = value.trim() || "claude-sonnet-4-6";
         await this.plugin.saveSettings();
       })
     );
@@ -350,9 +350,9 @@ var AICopilotSettingTab = class extends import_obsidian.PluginSettingTab {
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian.Setting(containerEl).setName("Bedrock model").setDesc("Bedrock model ID (e.g. us.anthropic.claude-sonnet-4-6-20250514-v1:0)").addText(
+    new import_obsidian.Setting(containerEl).setName("Bedrock model").setDesc("Bedrock model ID (e.g. us.anthropic.claude-sonnet-4-20250514-v1:0)").addText(
       (t) => t.setValue(this.plugin.settings.bedrockModel).onChange(async (value) => {
-        this.plugin.settings.bedrockModel = value.trim() || "us.anthropic.claude-sonnet-4-6-20250514-v1:0";
+        this.plugin.settings.bedrockModel = value.trim() || "us.anthropic.claude-sonnet-4-20250514-v1:0";
         await this.plugin.saveSettings();
       })
     );
@@ -1295,7 +1295,7 @@ var BedrockClient = class {
     }
     const payloadHash = await sha256(body);
     const host = url.hostname;
-    const canonicalUri = url.pathname;
+    const canonicalUri = "/" + url.pathname.split("/").filter(Boolean).map(encodeURIComponent).join("/");
     const canonicalQuerystring = "";
     const signedHeaders = "content-type;host;x-amz-date";
     const canonicalHeaders = `content-type:application/json
@@ -1346,13 +1346,13 @@ x-amz-date:${timestamp}
       system,
       messages: [{ role: "user", content: boundedPrompt }]
     });
-    const url = new URL(
-      `https://bedrock-runtime.${region}.amazonaws.com/model/${model}/invoke`
-    );
+    const host = `bedrock-runtime.${region}.amazonaws.com`;
+    const encodedPath = `/model/${encodeURIComponent(model)}/invoke`;
+    const url = new URL(`https://${host}${encodedPath}`);
     const now = /* @__PURE__ */ new Date();
     const timestamp = now.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
     const headers = await this.sign("POST", url, body, timestamp);
-    const response = await fetch(url.toString(), {
+    const response = await fetch(`https://${host}${encodedPath}`, {
       method: "POST",
       headers,
       body

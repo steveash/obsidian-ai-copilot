@@ -129,7 +129,11 @@ export class BedrockClient implements LLMClient {
 
     const payloadHash = await sha256(body);
     const host = url.hostname;
-    const canonicalUri = url.pathname;
+    // SigV4 requires each path segment to be URI-encoded; `new URL().pathname`
+    // does not encode chars like `:` that are valid in URLs but must be encoded
+    // for the canonical URI (e.g. model IDs containing `v1:0`).
+    const canonicalUri =
+      "/" + url.pathname.split("/").filter(Boolean).map(encodeURIComponent).join("/");
     const canonicalQuerystring = "";
 
     const signedHeaders = "content-type;host;x-amz-date";
@@ -193,15 +197,15 @@ export class BedrockClient implements LLMClient {
       messages: [{ role: "user", content: boundedPrompt }]
     });
 
-    const url = new URL(
-      `https://bedrock-runtime.${region}.amazonaws.com/model/${model}/invoke`
-    );
+    const host = `bedrock-runtime.${region}.amazonaws.com`;
+    const encodedPath = `/model/${encodeURIComponent(model)}/invoke`;
+    const url = new URL(`https://${host}${encodedPath}`);
 
     const now = new Date();
     const timestamp = now.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
     const headers = await this.sign("POST", url, body, timestamp);
 
-    const response = await fetch(url.toString(), {
+    const response = await fetch(`https://${host}${encodedPath}`, {
       method: "POST",
       headers,
       body

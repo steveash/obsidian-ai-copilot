@@ -104,14 +104,14 @@ In Obsidian plugin settings (**AI Copilot Settings**), choose a provider and con
 
 1. Set **Provider** to `anthropic`
 2. Paste **Anthropic API key** (`sk-ant-...`)
-3. Optionally change model (default: `claude-sonnet-4-6-20250514`)
+3. Optionally change model (default: `claude-sonnet-4-6`)
 
 ### AWS Bedrock
 
 1. Set **Provider** to `bedrock`
 2. Enter **AWS access key ID** (`AKIA...`) and **secret access key**
 3. Set **AWS region** (default: `us-west-2`)
-4. Set **Bedrock model ID** (default: `us.anthropic.claude-sonnet-4-6-20250514-v1:0`)
+4. Set **Bedrock model ID** (default: `us.anthropic.claude-sonnet-4-20250514-v1:0`)
 
 > **Bedrock model ID nuance:** Bedrock model IDs differ from Anthropic API model names. They use the format `us.anthropic.<model>-v1:0` (region-prefixed, versioned). Check the [AWS Bedrock model IDs documentation](https://docs.aws.amazon.com/bedrock/latest/userguide/models-supported.html) for the exact ID for your target model and region. Cross-region inference IDs (e.g. `us.anthropic.…`) are recommended for availability.
 

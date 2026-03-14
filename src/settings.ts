@@ -39,11 +39,11 @@ export const DEFAULT_SETTINGS: AICopilotSettings = {
   openaiApiKey: "",
   openaiModel: "gpt-4o-mini",
   anthropicApiKey: "",
-  anthropicModel: "claude-sonnet-4-6-20250514",
+  anthropicModel: "claude-sonnet-4-6",
   bedrockAccessKeyId: "",
   bedrockSecretAccessKey: "",
   bedrockRegion: "us-west-2",
-  bedrockModel: "us.anthropic.claude-sonnet-4-6-20250514-v1:0",
+  bedrockModel: "us.anthropic.claude-sonnet-4-20250514-v1:0",
   chatMaxResults: 6,
   refinementIntervalMinutes: 120,
   refinementLookbackDays: 3,
@@ -146,7 +146,7 @@ export class AICopilotSettingTab extends PluginSettingTab {
       .setDesc("Model used when provider is Anthropic")
       .addText((t) =>
         t.setValue(this.plugin.settings.anthropicModel).onChange(async (value) => {
-          this.plugin.settings.anthropicModel = value.trim() || "claude-sonnet-4-6-20250514";
+          this.plugin.settings.anthropicModel = value.trim() || "claude-sonnet-4-6";
           await this.plugin.saveSettings();
         })
       );
@@ -189,10 +189,10 @@ export class AICopilotSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Bedrock model")
-      .setDesc("Bedrock model ID (e.g. us.anthropic.claude-sonnet-4-6-20250514-v1:0)")
+      .setDesc("Bedrock model ID (e.g. us.anthropic.claude-sonnet-4-20250514-v1:0)")
       .addText((t) =>
         t.setValue(this.plugin.settings.bedrockModel).onChange(async (value) => {
-          this.plugin.settings.bedrockModel = value.trim() || "us.anthropic.claude-sonnet-4-6-20250514-v1:0";
+          this.plugin.settings.bedrockModel = value.trim() || "us.anthropic.claude-sonnet-4-20250514-v1:0";
           await this.plugin.saveSettings();
         })
       );

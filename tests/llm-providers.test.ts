@@ -14,11 +14,11 @@ const BASE: AICopilotSettings = {
   openaiApiKey: "",
   openaiModel: "gpt-4o-mini",
   anthropicApiKey: "",
-  anthropicModel: "claude-sonnet-4-6-20250514",
+  anthropicModel: "claude-sonnet-4-6",
   bedrockAccessKeyId: "",
   bedrockSecretAccessKey: "",
   bedrockRegion: "us-west-2",
-  bedrockModel: "us.anthropic.claude-sonnet-4-6-20250514-v1:0",
+  bedrockModel: "us.anthropic.claude-sonnet-4-20250514-v1:0",
   chatMaxResults: 6,
   refinementIntervalMinutes: 120,
   refinementLookbackDays: 3,
@@ -99,7 +99,7 @@ describe("AnthropicClient", () => {
     expect(opts.headers["anthropic-version"]).toBe("2023-06-01");
 
     const body = JSON.parse(opts.body);
-    expect(body.model).toBe("claude-sonnet-4-6-20250514");
+    expect(body.model).toBe("claude-sonnet-4-6");
     expect(body.system).toBe("system prompt");
     expect(body.messages[0].content).toBe("hello");
 
@@ -151,7 +151,7 @@ describe("BedrockClient", () => {
       bedrockAccessKeyId: "AKIAIOSFODNN7EXAMPLE",
       bedrockSecretAccessKey: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
       bedrockRegion: "us-west-2",
-      bedrockModel: "us.anthropic.claude-sonnet-4-6-20250514-v1:0"
+      bedrockModel: "us.anthropic.claude-sonnet-4-20250514-v1:0"
     });
 
     const result = await client.chat("test prompt");
@@ -160,7 +160,7 @@ describe("BedrockClient", () => {
 
     const [url, opts] = mockFetch.mock.calls[0];
     expect(url).toContain("bedrock-runtime.us-west-2.amazonaws.com");
-    expect(url).toContain("/model/us.anthropic.claude-sonnet-4-6-20250514-v1:0/invoke");
+    expect(url).toContain("/model/us.anthropic.claude-sonnet-4-20250514-v1%3A0/invoke");
     expect(opts.headers["Authorization"]).toContain("AWS4-HMAC-SHA256");
     expect(opts.headers["X-Amz-Date"]).toBeTruthy();
 
