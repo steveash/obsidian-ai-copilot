@@ -1,5 +1,5 @@
-import type { App, TFile } from "obsidian";
 import type { StoredVector, VectorIndexData, VectorStorage } from "./vector-index";
+import type { VaultAdapter } from "./vault-adapter";
 
 const INDEX_PATH = "AI Copilot/.index/vectors.json";
 
@@ -11,12 +11,11 @@ function getParsedRecords(value: unknown): Record<string, StoredVector> | null {
 }
 
 export class VaultVectorStorage implements VectorStorage {
-  constructor(private readonly app: App) {}
+  constructor(private readonly vault: VaultAdapter) {}
 
   async load(): Promise<VectorIndexData> {
-    const f = this.app.vault.getAbstractFileByPath(INDEX_PATH);
-    if (!f) return { version: 2, records: {} };
-    const text = await this.app.vault.read(f as TFile);
+    if (!this.vault.exists(INDEX_PATH)) return { version: 2, records: {} };
+    const text = await this.vault.read(INDEX_PATH);
     try {
       const parsed: unknown = JSON.parse(text);
       const records = getParsedRecords(parsed);
@@ -30,14 +29,11 @@ export class VaultVectorStorage implements VectorStorage {
   }
 
   async save(data: VectorIndexData): Promise<void> {
-    const folder = this.app.vault.getAbstractFileByPath("AI Copilot");
-    if (!folder) await this.app.vault.createFolder("AI Copilot");
-    const idxFolder = this.app.vault.getAbstractFileByPath("AI Copilot/.index");
-    if (!idxFolder) await this.app.vault.createFolder("AI Copilot/.index");
+    if (!this.vault.exists("AI Copilot")) await this.vault.createFolder("AI Copilot");
+    if (!this.vault.exists("AI Copilot/.index")) await this.vault.createFolder("AI Copilot/.index");
 
-    const existing = this.app.vault.getAbstractFileByPath(INDEX_PATH);
     const content = JSON.stringify(data);
-    if (existing) await this.app.vault.modify(existing as TFile, content);
-    else await this.app.vault.create(INDEX_PATH, content);
+    if (this.vault.exists(INDEX_PATH)) await this.vault.modify(INDEX_PATH, content);
+    else await this.vault.create(INDEX_PATH, content);
   }
 }

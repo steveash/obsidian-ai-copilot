@@ -15,10 +15,12 @@ import {
   toMarkdownRefinementPreview,
   type SmartRefinementSnapshot
 } from "./smart-refinement";
+import type { VaultAdapter } from "./vault-adapter";
 
 export interface CommandContext {
   addCommand: (command: Command) => void;
   app: App;
+  vault: VaultAdapter;
   getSettings: () => AICopilotSettings;
   setLastPatchState: (transactions: PatchTransaction[], path: string) => void;
   clearLastPatchState: () => void;
@@ -84,7 +86,7 @@ export function registerPluginCommands(
     callback: async () => {
       const file = ctx.app.workspace.getActiveFile();
       if (!file) return void new Notice("No active note selected.");
-      const content = await ctx.app.vault.read(file);
+      const content = await ctx.vault.read(file.path);
       const settings = ctx.getSettings();
 
       new Notice("AI Copilot: generating refinement preview…");
@@ -116,7 +118,7 @@ export function registerPluginCommands(
     callback: async () => {
       const file = ctx.app.workspace.getActiveFile();
       if (!file) return void new Notice("No active note selected.");
-      const content = await ctx.app.vault.read(file);
+      const content = await ctx.vault.read(file.path);
       const settings = ctx.getSettings();
 
       new Notice("AI Copilot: analyzing note for safe edits…");
@@ -147,8 +149,7 @@ export function registerPluginCommands(
 
       for (const sr of result.singleFileResults) {
         if (sr.applied.transactions.some((t) => t.applied)) {
-          const f = ctx.app.vault.getAbstractFileByPath(sr.path);
-          if (f instanceof TFile) await ctx.app.vault.modify(f, sr.applied.finalContent);
+          await ctx.vault.modify(sr.path, sr.applied.finalContent);
         }
       }
 
@@ -170,9 +171,8 @@ export function registerPluginCommands(
       const rollbackContents = buildRollbackContents(snapshot);
       let restored = 0;
       for (const [path, original] of rollbackContents) {
-        const f = ctx.app.vault.getAbstractFileByPath(path);
-        if (f instanceof TFile) {
-          await ctx.app.vault.modify(f, original);
+        if (ctx.vault.exists(path)) {
+          await ctx.vault.modify(path, original);
           restored++;
         }
       }
@@ -190,12 +190,11 @@ export function registerPluginCommands(
       if (!transactions.length || !path) {
         return void new Notice("No patch transaction available for rollback.");
       }
-      const file = ctx.app.vault.getAbstractFileByPath(path);
-      if (!(file instanceof TFile)) return void new Notice("Original note not found for rollback.");
-      const current = await ctx.app.vault.read(file);
+      if (!ctx.vault.exists(path)) return void new Notice("Original note not found for rollback.");
+      const current = await ctx.vault.read(path);
       const { rollbackPatchPlan } = await import("./patch-plan");
       const rolled = rollbackPatchPlan(current, transactions);
-      await ctx.app.vault.modify(file, rolled);
+      await ctx.vault.modify(path, rolled);
       ctx.clearLastPatchState();
       new Notice("AI Copilot: rolled back last structured patch.");
     }
@@ -224,7 +223,7 @@ export async function runRefinementFlow(
   candidates: Array<{ path: string; content: string }>,
   settings: AICopilotSettings,
   setLastPatchState: (transactions: PatchTransaction[], path: string) => void,
-  app: App,
+  vault: VaultAdapter,
   writeAssistantOutput: (name: string, body: string) => Promise<void>,
   setLastRefinementSnapshot?: (snapshot: SmartRefinementSnapshot) => void
 ) {
@@ -253,12 +252,8 @@ export async function runRefinementFlow(
 
       for (const sr of result.singleFileResults) {
         if (sr.applied.transactions.some((t) => t.applied)) {
-          const file = app.vault.getAbstractFileByPath(sr.path);
-          if (file instanceof TFile) {
-            await app.vault.modify(file, sr.applied.finalContent);
-            // Also set legacy patch state for backward compat rollback
-            setLastPatchState(sr.applied.transactions, sr.path);
-          }
+          await vault.modify(sr.path, sr.applied.finalContent);
+          setLastPatchState(sr.applied.transactions, sr.path);
         }
       }
 

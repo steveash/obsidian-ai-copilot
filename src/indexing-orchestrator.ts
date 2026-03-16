@@ -1,23 +1,23 @@
-import { TFile, type App } from "obsidian";
 import { OpenAIEmbeddingProvider, FallbackHashEmbeddingProvider } from "./embedding-provider";
 import { BackgroundIndexingQueue } from "./indexing-queue";
 import { removeIndexedNote, syncIndexedNote } from "./indexing-sync";
 import type { AICopilotSettings } from "./settings";
 import { PersistentVectorIndex } from "./vector-index";
 import { VaultVectorStorage } from "./vault-vector-storage";
+import type { VaultAdapter, VaultEventRef } from "./vault-adapter";
 
 export class IndexingOrchestrator {
   private vectorIndex: PersistentVectorIndex | null = null;
   readonly queue = new BackgroundIndexingQueue();
 
-  constructor(private readonly app: App, private readonly getSettings: () => AICopilotSettings) {}
+  constructor(private readonly vault: VaultAdapter, private readonly getSettings: () => AICopilotSettings) {}
 
   initializeVectorIndex() {
     const settings = this.getSettings();
     const provider = settings.provider === "openai"
       ? new OpenAIEmbeddingProvider(settings)
       : new FallbackHashEmbeddingProvider();
-    this.vectorIndex = new PersistentVectorIndex(new VaultVectorStorage(this.app), provider);
+    this.vectorIndex = new PersistentVectorIndex(new VaultVectorStorage(this.vault), provider);
   }
 
   getVectorIndex(): PersistentVectorIndex {
@@ -26,16 +26,16 @@ export class IndexingOrchestrator {
   }
 
   async getAllNotes(): Promise<Array<{ path: string; content: string; mtime: number }>> {
-    const files = this.app.vault.getMarkdownFiles();
+    const files = this.vault.listMarkdownFiles();
     return Promise.all(
-      files.map(async (f) => ({ path: f.path, content: await this.app.vault.read(f), mtime: f.stat.mtime }))
+      files.map(async (f) => ({ path: f.path, content: await this.vault.read(f.path), mtime: f.mtime }))
     );
   }
 
   async getRecentNotes(lookbackDays: number): Promise<Array<{ path: string; content: string }>> {
     const cutoff = Date.now() - lookbackDays * 24 * 60 * 60 * 1000;
-    const files = this.app.vault.getMarkdownFiles().filter((f) => f.stat.mtime >= cutoff);
-    return Promise.all(files.map(async (f) => ({ path: f.path, content: await this.app.vault.read(f) })));
+    const files = this.vault.listMarkdownFiles().filter((f) => f.mtime >= cutoff);
+    return Promise.all(files.map(async (f) => ({ path: f.path, content: await this.vault.read(f.path) })));
   }
 
   async rebuildPersistentIndex(): Promise<number> {
@@ -51,16 +51,16 @@ export class IndexingOrchestrator {
     );
   }
 
-  registerVaultSyncEvents(registerEvent: (evt: any) => void) {
+  registerVaultSyncEvents(registerEvent: (evt: VaultEventRef) => void) {
     registerEvent(
-      this.app.vault.on("modify", async (file) => {
-        if (!(file instanceof TFile) || !file.path.endsWith(".md")) return;
+      this.vault.on("modify", async (file) => {
+        if (!file.path.endsWith(".md")) return;
         this.queue.enqueue(async () => {
-          const content = await this.app.vault.read(file);
+          const content = await this.vault.read(file.path);
           const settings = this.getSettings();
           await syncIndexedNote(
             this.getVectorIndex(),
-            { path: file.path, content, mtime: file.stat.mtime },
+            { path: file.path, content, mtime: file.mtime },
             settings.embeddingModel,
             settings.retrievalChunkSize
           );
@@ -69,8 +69,8 @@ export class IndexingOrchestrator {
     );
 
     registerEvent(
-      this.app.vault.on("delete", async (file) => {
-        if (!("path" in file) || !file.path.endsWith(".md")) return;
+      this.vault.on("delete", async (file) => {
+        if (!file.path.endsWith(".md")) return;
         this.queue.enqueue(async () => {
           await removeIndexedNote(this.getVectorIndex(), file.path);
         });

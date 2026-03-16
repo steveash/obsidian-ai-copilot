@@ -1119,9 +1119,6 @@ ${x.content}`, x]));
   }
 };
 
-// src/indexing-orchestrator.ts
-var import_obsidian2 = require("obsidian");
-
 // src/embedding-provider.ts
 var OpenAIEmbeddingProvider = class {
   constructor(settings) {
@@ -1298,13 +1295,12 @@ function getParsedRecords(value) {
   return maybe.records;
 }
 var VaultVectorStorage = class {
-  constructor(app) {
-    this.app = app;
+  constructor(vault) {
+    this.vault = vault;
   }
   async load() {
-    const f = this.app.vault.getAbstractFileByPath(INDEX_PATH);
-    if (!f) return { version: 2, records: {} };
-    const text = await this.app.vault.read(f);
+    if (!this.vault.exists(INDEX_PATH)) return { version: 2, records: {} };
+    const text = await this.vault.read(INDEX_PATH);
     try {
       const parsed = JSON.parse(text);
       const records = getParsedRecords(parsed);
@@ -1317,21 +1313,18 @@ var VaultVectorStorage = class {
     }
   }
   async save(data) {
-    const folder = this.app.vault.getAbstractFileByPath("AI Copilot");
-    if (!folder) await this.app.vault.createFolder("AI Copilot");
-    const idxFolder = this.app.vault.getAbstractFileByPath("AI Copilot/.index");
-    if (!idxFolder) await this.app.vault.createFolder("AI Copilot/.index");
-    const existing = this.app.vault.getAbstractFileByPath(INDEX_PATH);
+    if (!this.vault.exists("AI Copilot")) await this.vault.createFolder("AI Copilot");
+    if (!this.vault.exists("AI Copilot/.index")) await this.vault.createFolder("AI Copilot/.index");
     const content = JSON.stringify(data);
-    if (existing) await this.app.vault.modify(existing, content);
-    else await this.app.vault.create(INDEX_PATH, content);
+    if (this.vault.exists(INDEX_PATH)) await this.vault.modify(INDEX_PATH, content);
+    else await this.vault.create(INDEX_PATH, content);
   }
 };
 
 // src/indexing-orchestrator.ts
 var IndexingOrchestrator = class {
-  constructor(app, getSettings) {
-    this.app = app;
+  constructor(vault, getSettings) {
+    this.vault = vault;
     this.getSettings = getSettings;
     this.vectorIndex = null;
     this.queue = new BackgroundIndexingQueue();
@@ -1339,22 +1332,22 @@ var IndexingOrchestrator = class {
   initializeVectorIndex() {
     const settings = this.getSettings();
     const provider = settings.provider === "openai" ? new OpenAIEmbeddingProvider(settings) : new FallbackHashEmbeddingProvider();
-    this.vectorIndex = new PersistentVectorIndex(new VaultVectorStorage(this.app), provider);
+    this.vectorIndex = new PersistentVectorIndex(new VaultVectorStorage(this.vault), provider);
   }
   getVectorIndex() {
     if (!this.vectorIndex) this.initializeVectorIndex();
     return this.vectorIndex;
   }
   async getAllNotes() {
-    const files = this.app.vault.getMarkdownFiles();
+    const files = this.vault.listMarkdownFiles();
     return Promise.all(
-      files.map(async (f) => ({ path: f.path, content: await this.app.vault.read(f), mtime: f.stat.mtime }))
+      files.map(async (f) => ({ path: f.path, content: await this.vault.read(f.path), mtime: f.mtime }))
     );
   }
   async getRecentNotes(lookbackDays) {
     const cutoff = Date.now() - lookbackDays * 24 * 60 * 60 * 1e3;
-    const files = this.app.vault.getMarkdownFiles().filter((f) => f.stat.mtime >= cutoff);
-    return Promise.all(files.map(async (f) => ({ path: f.path, content: await this.app.vault.read(f) })));
+    const files = this.vault.listMarkdownFiles().filter((f) => f.mtime >= cutoff);
+    return Promise.all(files.map(async (f) => ({ path: f.path, content: await this.vault.read(f.path) })));
   }
   async rebuildPersistentIndex() {
     const notes = await this.getAllNotes();
@@ -1371,14 +1364,14 @@ ${n.content}`,
   }
   registerVaultSyncEvents(registerEvent) {
     registerEvent(
-      this.app.vault.on("modify", async (file) => {
-        if (!(file instanceof import_obsidian2.TFile) || !file.path.endsWith(".md")) return;
+      this.vault.on("modify", async (file) => {
+        if (!file.path.endsWith(".md")) return;
         this.queue.enqueue(async () => {
-          const content = await this.app.vault.read(file);
+          const content = await this.vault.read(file.path);
           const settings = this.getSettings();
           await syncIndexedNote(
             this.getVectorIndex(),
-            { path: file.path, content, mtime: file.stat.mtime },
+            { path: file.path, content, mtime: file.mtime },
             settings.embeddingModel,
             settings.retrievalChunkSize
           );
@@ -1386,8 +1379,8 @@ ${n.content}`,
       })
     );
     registerEvent(
-      this.app.vault.on("delete", async (file) => {
-        if (!("path" in file) || !file.path.endsWith(".md")) return;
+      this.vault.on("delete", async (file) => {
+        if (!file.path.endsWith(".md")) return;
         this.queue.enqueue(async () => {
           await removeIndexedNote(this.getVectorIndex(), file.path);
         });
@@ -1397,7 +1390,7 @@ ${n.content}`,
 };
 
 // src/chat-orchestrator.ts
-var import_obsidian4 = require("obsidian");
+var import_obsidian3 = require("obsidian");
 
 // src/llm.ts
 var DryRunClient = class {
@@ -1589,14 +1582,17 @@ function buildClient(settings) {
 }
 
 // src/chat.ts
-var import_obsidian3 = require("obsidian");
+var import_obsidian2 = require("obsidian");
 var AI_COPILOT_VIEW = "ai-copilot-chat-view";
-var AICopilotChatView = class extends import_obsidian3.ItemView {
-  constructor(leaf, appRef) {
+var AICopilotChatView = class extends import_obsidian2.ItemView {
+  constructor(leaf) {
     super(leaf);
-    this.appRef = appRef;
     this.messages = [];
     this.onSubmit = null;
+    this.vault = null;
+  }
+  setVaultAdapter(vault) {
+    this.vault = vault;
   }
   getViewType() {
     return AI_COPILOT_VIEW;
@@ -1611,12 +1607,14 @@ var AICopilotChatView = class extends import_obsidian3.ItemView {
     this.render();
   }
   async openCitation(path) {
-    const file = this.appRef.vault.getAbstractFileByPath(path);
-    if (file && "path" in file) {
-      await this.appRef.workspace.getLeaf(true).openFile(file);
-      return;
+    if (this.vault?.exists(path)) {
+      const file = this.app.vault.getAbstractFileByPath(path);
+      if (file) {
+        await this.app.workspace.getLeaf(true).openFile(file);
+        return;
+      }
     }
-    new import_obsidian3.Notice(`AI Copilot: source not found (${path})`);
+    new import_obsidian2.Notice(`AI Copilot: source not found (${path})`);
   }
   render() {
     const root = this.containerEl.children[1];
@@ -1662,37 +1660,37 @@ var AICopilotChatView = class extends import_obsidian3.ItemView {
     };
   }
 };
-async function upsertChatOutput(app, text) {
+async function upsertChatOutput(vault, text) {
   const path = "AI Copilot/Chat Output.md";
-  const existing = app.vault.getAbstractFileByPath(path);
-  let file;
-  if (existing && "path" in existing) {
-    file = existing;
-  } else {
-    if (!app.vault.getAbstractFileByPath("AI Copilot")) {
-      await app.vault.createFolder("AI Copilot");
+  if (!vault.exists(path)) {
+    if (!vault.exists("AI Copilot")) {
+      await vault.createFolder("AI Copilot");
     }
-    file = await app.vault.create(path, "# Chat Output\n");
+    await vault.create(path, "# Chat Output\n");
   }
-  await app.vault.append(file, `
+  await vault.append(path, `
 
 ---
 ${(/* @__PURE__ */ new Date()).toISOString()}
 ${text}
 `);
-  return file;
 }
 
 // src/chat-orchestrator.ts
 var ChatOrchestrator = class {
-  constructor(app, getSettings, getRelevantNotes, writeAssistantOutput) {
+  constructor(app, vault, getSettings, getRelevantNotes, writeAssistantOutput) {
     this.app = app;
+    this.vault = vault;
     this.getSettings = getSettings;
     this.getRelevantNotes = getRelevantNotes;
     this.writeAssistantOutput = writeAssistantOutput;
   }
   registerView(registerView) {
-    registerView(AI_COPILOT_VIEW, (leaf) => new AICopilotChatView(leaf, this.app));
+    registerView(AI_COPILOT_VIEW, (leaf) => {
+      const view = new AICopilotChatView(leaf);
+      view.setVaultAdapter(this.vault);
+      return view;
+    });
   }
   async activateChatView() {
     const { workspace } = this.app;
@@ -1708,6 +1706,7 @@ var ChatOrchestrator = class {
     workspace.revealLeaf(leaf);
     const view = leaf.view;
     if (view instanceof AICopilotChatView) {
+      view.setVaultAdapter(this.vault);
       view.setSubmitHandler(async (query) => {
         const settings = this.getSettings();
         const related = await this.getRelevantNotes(query, settings.chatMaxResults);
@@ -1719,7 +1718,7 @@ Use these notes:
 
 ${context}`;
         const output = await buildClient(settings).chat(prompt, "Answer using only note evidence.");
-        await upsertChatOutput(this.app, `## Query
+        await upsertChatOutput(this.vault, `## Query
 ${query}
 
 ## Response
@@ -1733,7 +1732,7 @@ ${output}`);
     }
   }
   async chatActiveNote(file) {
-    const content = await this.app.vault.read(file);
+    const content = await this.vault.read(file.path);
     const settings = this.getSettings();
     const related = await this.getRelevantNotes(file.basename, settings.chatMaxResults);
     const prompt = [
@@ -1746,7 +1745,7 @@ ${n.content.slice(0, 500)}`),
     ].join("\n\n");
     const output = await buildClient(settings).chat(prompt, "You are an Obsidian assistant.");
     await this.writeAssistantOutput("Chat Output", output);
-    new import_obsidian4.Notice("AI Copilot: chat output saved to AI Copilot/Chat Output.md");
+    new import_obsidian3.Notice("AI Copilot: chat output saved to AI Copilot/Chat Output.md");
   }
   async chatQuery(query) {
     const settings = this.getSettings();
@@ -1759,17 +1758,17 @@ Use these notes:
 
 ${context}`;
     const output = await buildClient(settings).chat(prompt, "Answer using only note evidence.");
-    await upsertChatOutput(this.app, `## Query
+    await upsertChatOutput(this.vault, `## Query
 ${query}
 
 ## Response
 ${output}`);
-    new import_obsidian4.Notice("AI Copilot: query response saved.");
+    new import_obsidian3.Notice("AI Copilot: query response saved.");
   }
 };
 
 // src/command-registration.ts
-var import_obsidian5 = require("obsidian");
+var import_obsidian4 = require("obsidian");
 
 // src/refinement.ts
 function extractTodos(markdown) {
@@ -2181,7 +2180,7 @@ function registerPluginCommands(ctx, chat, indexing) {
     name: "AI Copilot: Chat about active note",
     callback: async () => {
       const file = ctx.app.workspace.getActiveFile();
-      if (!file) return void new import_obsidian5.Notice("No active note selected.");
+      if (!file) return void new import_obsidian4.Notice("No active note selected.");
       await chat.chatActiveNote(file);
     }
   });
@@ -2199,7 +2198,7 @@ function registerPluginCommands(ctx, chat, indexing) {
     name: "AI Copilot: Rebuild persistent vector index",
     callback: async () => {
       const count = await indexing.rebuildPersistentIndex();
-      new import_obsidian5.Notice(`AI Copilot: rebuilt vector index for ${count} notes.`);
+      new import_obsidian4.Notice(`AI Copilot: rebuilt vector index for ${count} notes.`);
     }
   });
   ctx.addCommand({
@@ -2212,10 +2211,10 @@ function registerPluginCommands(ctx, chat, indexing) {
     name: "AI Copilot: Preview structured refinement patch",
     callback: async () => {
       const file = ctx.app.workspace.getActiveFile();
-      if (!file) return void new import_obsidian5.Notice("No active note selected.");
-      const content = await ctx.app.vault.read(file);
+      if (!file) return void new import_obsidian4.Notice("No active note selected.");
+      const content = await ctx.vault.read(file.path);
       const settings = ctx.getSettings();
-      new import_obsidian5.Notice("AI Copilot: generating refinement preview\u2026");
+      new import_obsidian4.Notice("AI Copilot: generating refinement preview\u2026");
       const candidates = [{ path: file.path, content }];
       const prompt = buildRefinementPrompt(candidates, {
         enableWebEnrichment: settings.enableWebEnrichment
@@ -2235,7 +2234,7 @@ ${prompt}`,
         (sum, p) => sum + p.preview.summary.totalEdits,
         0
       );
-      new import_obsidian5.Notice(`AI Copilot: preview logged \u2014 ${editCount} edit(s) proposed.`);
+      new import_obsidian4.Notice(`AI Copilot: preview logged \u2014 ${editCount} edit(s) proposed.`);
     }
   });
   ctx.addCommand({
@@ -2243,10 +2242,10 @@ ${prompt}`,
     name: "AI Copilot: Auto-apply safe refinement edits",
     callback: async () => {
       const file = ctx.app.workspace.getActiveFile();
-      if (!file) return void new import_obsidian5.Notice("No active note selected.");
-      const content = await ctx.app.vault.read(file);
+      if (!file) return void new import_obsidian4.Notice("No active note selected.");
+      const content = await ctx.vault.read(file.path);
       const settings = ctx.getSettings();
-      new import_obsidian5.Notice("AI Copilot: analyzing note for safe edits\u2026");
+      new import_obsidian4.Notice("AI Copilot: analyzing note for safe edits\u2026");
       const candidates = [{ path: file.path, content }];
       const prompt = buildRefinementPrompt(candidates, {
         enableWebEnrichment: settings.enableWebEnrichment
@@ -2267,13 +2266,12 @@ ${prompt}`,
       );
       if (totalSafe === 0) {
         await ctx.writeAssistantOutput("Refinement Log", toMarkdownRefinementPreview(preview));
-        return void new import_obsidian5.Notice("AI Copilot: no safe edits to apply. Preview logged.");
+        return void new import_obsidian4.Notice("AI Copilot: no safe edits to apply. Preview logged.");
       }
       const { result, snapshot } = applyRefinementDecision(preview, decision, fileContents);
       for (const sr of result.singleFileResults) {
         if (sr.applied.transactions.some((t) => t.applied)) {
-          const f = ctx.app.vault.getAbstractFileByPath(sr.path);
-          if (f instanceof import_obsidian5.TFile) await ctx.app.vault.modify(f, sr.applied.finalContent);
+          await ctx.vault.modify(sr.path, sr.applied.finalContent);
         }
       }
       ctx.setLastRefinementSnapshot(snapshot);
@@ -2284,7 +2282,7 @@ ${result.summary}
 
 ${toMarkdownRefinementPreview(preview)}`
       );
-      new import_obsidian5.Notice(`AI Copilot: applied ${totalSafe} safe edit(s).`);
+      new import_obsidian4.Notice(`AI Copilot: applied ${totalSafe} safe edit(s).`);
     }
   });
   ctx.addCommand({
@@ -2292,18 +2290,17 @@ ${toMarkdownRefinementPreview(preview)}`
     name: "AI Copilot: Roll back last smart refinement",
     callback: async () => {
       const snapshot = ctx.getLastRefinementSnapshot();
-      if (!snapshot) return void new import_obsidian5.Notice("No smart refinement snapshot available for rollback.");
+      if (!snapshot) return void new import_obsidian4.Notice("No smart refinement snapshot available for rollback.");
       const rollbackContents = buildRollbackContents(snapshot);
       let restored = 0;
       for (const [path, original] of rollbackContents) {
-        const f = ctx.app.vault.getAbstractFileByPath(path);
-        if (f instanceof import_obsidian5.TFile) {
-          await ctx.app.vault.modify(f, original);
+        if (ctx.vault.exists(path)) {
+          await ctx.vault.modify(path, original);
           restored++;
         }
       }
       ctx.clearLastRefinementSnapshot();
-      new import_obsidian5.Notice(`AI Copilot: rolled back ${restored} file(s) to pre-refinement state.`);
+      new import_obsidian4.Notice(`AI Copilot: rolled back ${restored} file(s) to pre-refinement state.`);
     }
   });
   ctx.addCommand({
@@ -2312,16 +2309,15 @@ ${toMarkdownRefinementPreview(preview)}`
     callback: async () => {
       const { transactions, path } = ctx.getLastPatchState();
       if (!transactions.length || !path) {
-        return void new import_obsidian5.Notice("No patch transaction available for rollback.");
+        return void new import_obsidian4.Notice("No patch transaction available for rollback.");
       }
-      const file = ctx.app.vault.getAbstractFileByPath(path);
-      if (!(file instanceof import_obsidian5.TFile)) return void new import_obsidian5.Notice("Original note not found for rollback.");
-      const current = await ctx.app.vault.read(file);
+      if (!ctx.vault.exists(path)) return void new import_obsidian4.Notice("Original note not found for rollback.");
+      const current = await ctx.vault.read(path);
       const { rollbackPatchPlan: rollbackPatchPlan2 } = await Promise.resolve().then(() => (init_patch_plan(), patch_plan_exports));
       const rolled = rollbackPatchPlan2(current, transactions);
-      await ctx.app.vault.modify(file, rolled);
+      await ctx.vault.modify(path, rolled);
       ctx.clearLastPatchState();
-      new import_obsidian5.Notice("AI Copilot: rolled back last structured patch.");
+      new import_obsidian4.Notice("AI Copilot: rolled back last structured patch.");
     }
   });
   ctx.addCommand({
@@ -2339,12 +2335,12 @@ ${toMarkdownRefinementPreview(preview)}`
       ].join(" \xB7 ");
       await ctx.writeAssistantOutput("Refinement Log", `## Indexing Queue Diagnostics
 ${summary}`);
-      new import_obsidian5.Notice(`AI Copilot indexing: ${summary}`);
+      new import_obsidian4.Notice(`AI Copilot indexing: ${summary}`);
     }
   });
 }
-async function runRefinementFlow(candidates, settings, setLastPatchState, app, writeAssistantOutput, setLastRefinementSnapshot) {
-  if (!candidates.length) return void new import_obsidian5.Notice("AI Copilot: no recent notes to refine.");
+async function runRefinementFlow(candidates, settings, setLastPatchState, vault, writeAssistantOutput, setLastRefinementSnapshot) {
+  if (!candidates.length) return void new import_obsidian4.Notice("AI Copilot: no recent notes to refine.");
   const plan = buildRefinementPlan(candidates);
   const prompt = buildRefinementPrompt(candidates, {
     enableWebEnrichment: settings.enableWebEnrichment
@@ -2367,18 +2363,15 @@ ${prompt}`,
       const { result, snapshot } = applyRefinementDecision(preview, decision, fileContents);
       for (const sr of result.singleFileResults) {
         if (sr.applied.transactions.some((t) => t.applied)) {
-          const file = app.vault.getAbstractFileByPath(sr.path);
-          if (file instanceof import_obsidian5.TFile) {
-            await app.vault.modify(file, sr.applied.finalContent);
-            setLastPatchState(sr.applied.transactions, sr.path);
-          }
+          await vault.modify(sr.path, sr.applied.finalContent);
+          setLastPatchState(sr.applied.transactions, sr.path);
         }
       }
       if (setLastRefinementSnapshot) setLastRefinementSnapshot(snapshot);
     }
   }
   const md = toMarkdownRefinementPreview(preview);
-  new import_obsidian5.Notice(`AI Copilot: scanned ${candidates.length} notes \xB7 TODOs ${preview.todoCount}`);
+  new import_obsidian4.Notice(`AI Copilot: scanned ${candidates.length} notes \xB7 TODOs ${preview.todoCount}`);
   await writeAssistantOutput("Refinement Log", `${toMarkdownPlan(plan)}
 
 ${md}
@@ -2386,6 +2379,59 @@ ${md}
 ## Raw LLM Output
 ${output}`);
 }
+
+// src/obsidian-vault-adapter.ts
+var import_obsidian5 = require("obsidian");
+var ObsidianVaultAdapter = class {
+  constructor(app) {
+    this.app = app;
+  }
+  listMarkdownFiles() {
+    return this.app.vault.getMarkdownFiles().map((f) => ({
+      path: f.path,
+      mtime: f.stat.mtime
+    }));
+  }
+  async read(path) {
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (!(file instanceof import_obsidian5.TFile)) throw new Error(`File not found: ${path}`);
+    return this.app.vault.read(file);
+  }
+  exists(path) {
+    return this.app.vault.getAbstractFileByPath(path) !== null;
+  }
+  async create(path, content) {
+    await this.app.vault.create(path, content);
+  }
+  async modify(path, content) {
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (!(file instanceof import_obsidian5.TFile)) throw new Error(`File not found: ${path}`);
+    await this.app.vault.modify(file, content);
+  }
+  async append(path, content) {
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (!(file instanceof import_obsidian5.TFile)) throw new Error(`File not found: ${path}`);
+    await this.app.vault.append(file, content);
+  }
+  async createFolder(path) {
+    await this.app.vault.createFolder(path);
+  }
+  on(event, callback) {
+    if (event === "modify") {
+      return this.app.vault.on("modify", (f) => {
+        if (f instanceof import_obsidian5.TFile) {
+          callback({ path: f.path, mtime: f.stat.mtime });
+        }
+      });
+    }
+    return this.app.vault.on("delete", (f) => {
+      if ("path" in f) {
+        const mtime = f instanceof import_obsidian5.TFile ? f.stat.mtime : 0;
+        callback({ path: f.path, mtime });
+      }
+    });
+  }
+};
 
 // src/main.ts
 var AICopilotPlugin = class extends import_obsidian6.Plugin {
@@ -2396,7 +2442,8 @@ var AICopilotPlugin = class extends import_obsidian6.Plugin {
     this.lastPatchTransactions = [];
     this.lastPatchTargetPath = null;
     this.lastRefinementSnapshot = null;
-    this.indexing = new IndexingOrchestrator(this.app, () => this.settings);
+    this.vault_ = new ObsidianVaultAdapter(this.app);
+    this.indexing = new IndexingOrchestrator(this.vault_, () => this.settings);
     this.retrieval = new RetrievalOrchestrator({
       getAllNotes: () => this.indexing.getAllNotes(),
       getVectorIndex: () => this.indexing.getVectorIndex(),
@@ -2404,6 +2451,7 @@ var AICopilotPlugin = class extends import_obsidian6.Plugin {
     });
     this.chat = new ChatOrchestrator(
       this.app,
+      this.vault_,
       () => this.settings,
       (query, max) => this.retrieval.getRelevantNotes(query, max),
       (name, body) => this.writeAssistantOutput(name, body)
@@ -2422,6 +2470,7 @@ var AICopilotPlugin = class extends import_obsidian6.Plugin {
       {
         addCommand: (cmd) => this.addCommand(cmd),
         app: this.app,
+        vault: this.vault_,
         getSettings: () => this.settings,
         setLastPatchState: (transactions, path) => {
           this.lastPatchTransactions = transactions;
@@ -2479,7 +2528,7 @@ var AICopilotPlugin = class extends import_obsidian6.Plugin {
         this.lastPatchTransactions = transactions;
         this.lastPatchTargetPath = path;
       },
-      this.app,
+      this.vault_,
       (name, body) => this.writeAssistantOutput(name, body),
       (snapshot) => {
         this.lastRefinementSnapshot = snapshot;
@@ -2490,25 +2539,25 @@ var AICopilotPlugin = class extends import_obsidian6.Plugin {
     return rollbackPatchPlan(current, this.lastPatchTransactions);
   }
   async writeAssistantOutput(name, body) {
-    const file = await this.ensurePluginFile(`${name}.md`, `# ${name}
+    await this.ensurePluginFile(`${name}.md`, `# ${name}
 `);
+    const path = `AI Copilot/${name}.md`;
     const stamp = `
 
 ---
 ${(/* @__PURE__ */ new Date()).toISOString()}
 `;
     const out = this.settings.redactSensitiveLogs ? redactSensitive(body) : body;
-    await this.app.vault.append(file, `${stamp}${out}
+    await this.vault_.append(path, `${stamp}${out}
 `);
   }
   async ensurePluginFile(name, initial) {
     const folderPath = "AI Copilot";
     const path = `${folderPath}/${name}`;
-    const existing = this.app.vault.getAbstractFileByPath(path);
-    if (existing instanceof import_obsidian6.TFile) return existing;
-    if (!this.app.vault.getAbstractFileByPath(folderPath)) {
-      await this.app.vault.createFolder(folderPath);
+    if (this.vault_.exists(path)) return;
+    if (!this.vault_.exists(folderPath)) {
+      await this.vault_.createFolder(folderPath);
     }
-    return this.app.vault.create(path, initial);
+    await this.vault_.create(path, initial);
   }
 };

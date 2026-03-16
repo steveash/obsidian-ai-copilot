@@ -1,4 +1,4 @@
-import { Notice, Plugin, TFile } from "obsidian";
+import { Notice, Plugin } from "obsidian";
 import { rollbackPatchPlan } from "./patch-plan";
 import { redactSensitive } from "./safety";
 import { AICopilotSettingTab, DEFAULT_SETTINGS, type AICopilotSettings } from "./settings";
@@ -7,6 +7,8 @@ import { RetrievalOrchestrator } from "./retrieval-orchestrator";
 import { IndexingOrchestrator } from "./indexing-orchestrator";
 import { ChatOrchestrator } from "./chat-orchestrator";
 import { registerPluginCommands, runRefinementFlow } from "./command-registration";
+import { ObsidianVaultAdapter } from "./obsidian-vault-adapter";
+import type { VaultAdapter } from "./vault-adapter";
 import type { PatchTransaction } from "./patcher";
 import type { SmartRefinementSnapshot } from "./smart-refinement";
 
@@ -17,7 +19,8 @@ export default class AICopilotPlugin extends Plugin {
   private lastPatchTargetPath: string | null = null;
   private lastRefinementSnapshot: SmartRefinementSnapshot | null = null;
 
-  private indexing = new IndexingOrchestrator(this.app, () => this.settings);
+  private vault_: VaultAdapter = new ObsidianVaultAdapter(this.app);
+  private indexing = new IndexingOrchestrator(this.vault_, () => this.settings);
   private retrieval = new RetrievalOrchestrator({
     getAllNotes: () => this.indexing.getAllNotes(),
     getVectorIndex: () => this.indexing.getVectorIndex(),
@@ -25,6 +28,7 @@ export default class AICopilotPlugin extends Plugin {
   });
   private chat = new ChatOrchestrator(
     this.app,
+    this.vault_,
     () => this.settings,
     (query, max) => this.retrieval.getRelevantNotes(query, max),
     (name, body) => this.writeAssistantOutput(name, body)
@@ -45,6 +49,7 @@ export default class AICopilotPlugin extends Plugin {
       {
         addCommand: (cmd) => this.addCommand(cmd),
         app: this.app,
+        vault: this.vault_,
         getSettings: () => this.settings,
         setLastPatchState: (transactions, path) => {
           this.lastPatchTransactions = transactions;
@@ -66,7 +71,7 @@ export default class AICopilotPlugin extends Plugin {
     );
 
     this.startRefinementLoop();
-    this.indexing.registerVaultSyncEvents((evt) => this.registerEvent(evt));
+    this.indexing.registerVaultSyncEvents((evt) => this.registerEvent(evt as any));
 
     new Notice("AI Copilot loaded.");
   }
@@ -105,7 +110,7 @@ export default class AICopilotPlugin extends Plugin {
         this.lastPatchTransactions = transactions;
         this.lastPatchTargetPath = path;
       },
-      this.app,
+      this.vault_,
       (name, body) => this.writeAssistantOutput(name, body),
       (snapshot) => { this.lastRefinementSnapshot = snapshot; }
     );
@@ -116,20 +121,20 @@ export default class AICopilotPlugin extends Plugin {
   }
 
   private async writeAssistantOutput(name: string, body: string) {
-    const file = await this.ensurePluginFile(`${name}.md`, `# ${name}\n`);
+    await this.ensurePluginFile(`${name}.md`, `# ${name}\n`);
+    const path = `AI Copilot/${name}.md`;
     const stamp = `\n\n---\n${new Date().toISOString()}\n`;
     const out = this.settings.redactSensitiveLogs ? redactSensitive(body) : body;
-    await this.app.vault.append(file, `${stamp}${out}\n`);
+    await this.vault_.append(path, `${stamp}${out}\n`);
   }
 
-  private async ensurePluginFile(name: string, initial: string): Promise<TFile> {
+  private async ensurePluginFile(name: string, initial: string): Promise<void> {
     const folderPath = "AI Copilot";
     const path = `${folderPath}/${name}`;
-    const existing = this.app.vault.getAbstractFileByPath(path);
-    if (existing instanceof TFile) return existing;
-    if (!this.app.vault.getAbstractFileByPath(folderPath)) {
-      await this.app.vault.createFolder(folderPath);
+    if (this.vault_.exists(path)) return;
+    if (!this.vault_.exists(folderPath)) {
+      await this.vault_.createFolder(folderPath);
     }
-    return this.app.vault.create(path, initial);
+    await this.vault_.create(path, initial);
   }
 }
