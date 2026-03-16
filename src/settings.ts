@@ -21,7 +21,9 @@ export interface AICopilotSettings {
   retrievalSemanticWeight: number;
   retrievalFreshnessWeight: number;
   retrievalGraphExpandHops: number;
+  embeddingProvider: "openai" | "bedrock" | "fallback-hash";
   embeddingModel: string;
+  bedrockEmbeddingModel: string;
   preselectCandidateCount: number;
   retrievalChunkSize: number;
   rerankerEnabled: boolean;
@@ -53,7 +55,9 @@ export const DEFAULT_SETTINGS: AICopilotSettings = {
   retrievalSemanticWeight: 0.45,
   retrievalFreshnessWeight: 0.1,
   retrievalGraphExpandHops: 1,
+  embeddingProvider: "fallback-hash",
   embeddingModel: "text-embedding-3-large",
+  bedrockEmbeddingModel: "amazon.titan-embed-text-v2:0",
   preselectCandidateCount: 40,
   retrievalChunkSize: 1200,
   rerankerEnabled: true,
@@ -69,6 +73,11 @@ export const DEFAULT_SETTINGS: AICopilotSettings = {
 function parseProvider(value: string): AICopilotSettings["provider"] {
   if (value === "openai" || value === "anthropic" || value === "bedrock") return value;
   return "none";
+}
+
+function parseEmbeddingProvider(value: string): AICopilotSettings["embeddingProvider"] {
+  if (value === "openai" || value === "bedrock") return value;
+  return "fallback-hash";
 }
 
 function parseRerankerType(value: string): AICopilotSettings["rerankerType"] {
@@ -317,11 +326,36 @@ export class AICopilotSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Embedding model")
-      .setDesc("Remote embedding model for persistent vector index")
+      .setName("Embedding provider")
+      .setDesc("Provider for vector embeddings (switching triggers index rebuild)")
+      .addDropdown((d) =>
+        d
+          .addOption("fallback-hash", "Local hash (no API)")
+          .addOption("openai", "OpenAI")
+          .addOption("bedrock", "AWS Bedrock (Titan)")
+          .setValue(this.plugin.settings.embeddingProvider)
+          .onChange(async (value: string) => {
+            this.plugin.settings.embeddingProvider = parseEmbeddingProvider(value);
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Embedding model (OpenAI)")
+      .setDesc("OpenAI embedding model for persistent vector index")
       .addText((t) =>
         t.setValue(this.plugin.settings.embeddingModel).onChange(async (value) => {
           this.plugin.settings.embeddingModel = value.trim() || "text-embedding-3-large";
+          await this.plugin.saveSettings();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Embedding model (Bedrock)")
+      .setDesc("Bedrock Titan embedding model ID")
+      .addText((t) =>
+        t.setValue(this.plugin.settings.bedrockEmbeddingModel).onChange(async (value) => {
+          this.plugin.settings.bedrockEmbeddingModel = value.trim() || "amazon.titan-embed-text-v2:0";
           await this.plugin.saveSettings();
         })
       );

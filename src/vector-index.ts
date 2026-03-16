@@ -12,6 +12,7 @@ export interface StoredVector {
 
 export interface VectorIndexData {
   version: 2;
+  embeddingProvider?: string;
   records: Record<string, StoredVector>;
 }
 
@@ -108,8 +109,20 @@ export class PersistentVectorIndex {
   }
 
   async rebuild(chunks: Array<{ id: string; path: string; content: string; mtime?: number }>, model: string): Promise<number> {
-    this.cache = { version: 2, records: {} };
+    this.cache = { version: 2, embeddingProvider: this.cache?.embeddingProvider, records: {} };
     await this.storage.save(this.cache);
     return this.indexChunks(chunks, model);
+  }
+
+  async getStoredProvider(): Promise<string | undefined> {
+    await this.ensureLoaded();
+    return this.cache?.embeddingProvider;
+  }
+
+  async setProvider(provider: string): Promise<void> {
+    await this.ensureLoaded();
+    if (!this.cache) throw new Error("Vector cache failed to initialize");
+    this.cache.embeddingProvider = provider;
+    await this.storage.save(this.cache);
   }
 }

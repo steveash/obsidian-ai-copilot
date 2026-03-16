@@ -1,5 +1,6 @@
 import type { AICopilotSettings } from "./settings";
 import { redactSensitive } from "./safety";
+import { signBedrockRequest } from "./bedrock-signing";
 
 export interface LLMClient {
   chat(prompt: string, system?: string): Promise<string>;
@@ -97,88 +98,6 @@ export class AnthropicClient implements LLMClient {
 export class BedrockClient implements LLMClient {
   constructor(private readonly settings: AICopilotSettings) {}
 
-  /** AWS Signature V4 signing for Bedrock invoke requests. */
-  private async sign(
-    method: string,
-    url: URL,
-    body: string,
-    timestamp: string
-  ): Promise<Record<string, string>> {
-    const region = this.settings.bedrockRegion;
-    const accessKey = this.settings.bedrockAccessKeyId;
-    const secretKey = this.settings.bedrockSecretAccessKey;
-    const service = "bedrock";
-    const dateStamp = timestamp.slice(0, 8);
-
-    const enc = new TextEncoder();
-
-    async function hmac(key: ArrayBuffer | Uint8Array, data: string): Promise<ArrayBuffer> {
-      const cryptoKey = await crypto.subtle.importKey(
-        "raw",
-        key instanceof ArrayBuffer ? new Uint8Array(key) as BufferSource : key as BufferSource,
-        { name: "HMAC", hash: "SHA-256" },
-        false,
-        ["sign"]
-      );
-      return crypto.subtle.sign("HMAC", cryptoKey, enc.encode(data));
-    }
-
-    async function sha256(data: string): Promise<string> {
-      const digest = await crypto.subtle.digest("SHA-256", enc.encode(data));
-      return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
-    }
-
-    const payloadHash = await sha256(body);
-    const host = url.hostname;
-    // SigV4 requires each path segment to be URI-encoded; `new URL().pathname`
-    // does not encode chars like `:` that are valid in URLs but must be encoded
-    // for the canonical URI (e.g. model IDs containing `v1:0`).
-    const canonicalUri =
-      "/" + url.pathname.split("/").filter(Boolean).map(encodeURIComponent).join("/");
-    const canonicalQuerystring = "";
-
-    const signedHeaders = "content-type;host;x-amz-date";
-    const canonicalHeaders =
-      `content-type:application/json\nhost:${host}\nx-amz-date:${timestamp}\n`;
-
-    const canonicalRequest = [
-      method,
-      canonicalUri,
-      canonicalQuerystring,
-      canonicalHeaders,
-      signedHeaders,
-      payloadHash
-    ].join("\n");
-
-    const credentialScope = `${dateStamp}/${region}/${service}/aws4_request`;
-    const stringToSign = [
-      "AWS4-HMAC-SHA256",
-      timestamp,
-      credentialScope,
-      await sha256(canonicalRequest)
-    ].join("\n");
-
-    const kDate = await hmac(enc.encode("AWS4" + secretKey), dateStamp);
-    const kRegion = await hmac(kDate, region);
-    const kService = await hmac(kRegion, service);
-    const kSigning = await hmac(kService, "aws4_request");
-
-    const signatureBuffer = await hmac(kSigning, stringToSign);
-    const signature = [...new Uint8Array(signatureBuffer)]
-      .map((b) => b.toString(16).padStart(2, "0"))
-      .join("");
-
-    const authorization =
-      `AWS4-HMAC-SHA256 Credential=${accessKey}/${credentialScope}, ` +
-      `SignedHeaders=${signedHeaders}, Signature=${signature}`;
-
-    return {
-      "Content-Type": "application/json",
-      "X-Amz-Date": timestamp,
-      Authorization: authorization
-    };
-  }
-
   async chat(prompt: string, system = "You are a helpful note assistant."): Promise<string> {
     if (!this.settings.allowRemoteModels) {
       throw new Error("Remote model calls are disabled in settings");
@@ -204,7 +123,10 @@ export class BedrockClient implements LLMClient {
 
     const now = new Date();
     const timestamp = now.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
-    const headers = await this.sign("POST", url, body, timestamp);
+    const headers = await signBedrockRequest(
+      "POST", url, body, timestamp, region,
+      this.settings.bedrockAccessKeyId, this.settings.bedrockSecretAccessKey
+    );
 
     const response = await fetch(`https://${host}${encodedPath}`, {
       method: "POST",

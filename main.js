@@ -475,7 +475,9 @@ var DEFAULT_SETTINGS = {
   retrievalSemanticWeight: 0.45,
   retrievalFreshnessWeight: 0.1,
   retrievalGraphExpandHops: 1,
+  embeddingProvider: "fallback-hash",
   embeddingModel: "text-embedding-3-large",
+  bedrockEmbeddingModel: "amazon.titan-embed-text-v2:0",
   preselectCandidateCount: 40,
   retrievalChunkSize: 1200,
   rerankerEnabled: true,
@@ -490,6 +492,10 @@ var DEFAULT_SETTINGS = {
 function parseProvider(value) {
   if (value === "openai" || value === "anthropic" || value === "bedrock") return value;
   return "none";
+}
+function parseEmbeddingProvider(value) {
+  if (value === "openai" || value === "bedrock") return value;
+  return "fallback-hash";
 }
 function parseRerankerType(value) {
   return value === "openai" ? "openai" : "heuristic";
@@ -614,9 +620,21 @@ var AICopilotSettingTab = class extends import_obsidian.PluginSettingTab {
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian.Setting(containerEl).setName("Embedding model").setDesc("Remote embedding model for persistent vector index").addText(
+    new import_obsidian.Setting(containerEl).setName("Embedding provider").setDesc("Provider for vector embeddings (switching triggers index rebuild)").addDropdown(
+      (d) => d.addOption("fallback-hash", "Local hash (no API)").addOption("openai", "OpenAI").addOption("bedrock", "AWS Bedrock (Titan)").setValue(this.plugin.settings.embeddingProvider).onChange(async (value) => {
+        this.plugin.settings.embeddingProvider = parseEmbeddingProvider(value);
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian.Setting(containerEl).setName("Embedding model (OpenAI)").setDesc("OpenAI embedding model for persistent vector index").addText(
       (t) => t.setValue(this.plugin.settings.embeddingModel).onChange(async (value) => {
         this.plugin.settings.embeddingModel = value.trim() || "text-embedding-3-large";
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian.Setting(containerEl).setName("Embedding model (Bedrock)").setDesc("Bedrock Titan embedding model ID").addText(
+      (t) => t.setValue(this.plugin.settings.bedrockEmbeddingModel).onChange(async (value) => {
+        this.plugin.settings.bedrockEmbeddingModel = value.trim() || "amazon.titan-embed-text-v2:0";
         await this.plugin.saveSettings();
       })
     );
@@ -696,6 +714,15 @@ function validateSettings(input) {
     issues.push("Bedrock provider requires AWS access key ID and secret access key.");
   }
   if (input.provider === "bedrock" && !input.bedrockRegion) issues.push("Bedrock provider requires an AWS region.");
+  if (input.embeddingProvider === "openai" && !input.openaiApiKey) {
+    issues.push("OpenAI embedding provider requires an API key.");
+  }
+  if (input.embeddingProvider === "bedrock" && (!input.bedrockAccessKeyId || !input.bedrockSecretAccessKey)) {
+    issues.push("Bedrock embedding provider requires AWS access key ID and secret access key.");
+  }
+  if (input.embeddingProvider === "bedrock" && !input.bedrockRegion) {
+    issues.push("Bedrock embedding provider requires an AWS region.");
+  }
   const weights = input.retrievalLexicalWeight + input.retrievalSemanticWeight + input.retrievalFreshnessWeight;
   if (weights > 1.5) issues.push("Retrieval weight sum is too high; expected <= 1.5.");
   if (input.maxPromptChars < 2e3 || input.maxPromptChars > 1e5) {
@@ -1122,6 +1149,63 @@ ${x.content}`, x]));
 // src/indexing-orchestrator.ts
 var import_obsidian2 = require("obsidian");
 
+// src/bedrock-signing.ts
+async function signBedrockRequest(method, url, body, timestamp, region, accessKey, secretKey) {
+  const service = "bedrock";
+  const dateStamp = timestamp.slice(0, 8);
+  const enc = new TextEncoder();
+  async function hmac(key, data) {
+    const cryptoKey = await crypto.subtle.importKey(
+      "raw",
+      key instanceof ArrayBuffer ? new Uint8Array(key) : key,
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"]
+    );
+    return crypto.subtle.sign("HMAC", cryptoKey, enc.encode(data));
+  }
+  async function sha256(data) {
+    const digest = await crypto.subtle.digest("SHA-256", enc.encode(data));
+    return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  }
+  const payloadHash = await sha256(body);
+  const host = url.hostname;
+  const canonicalUri = "/" + url.pathname.split("/").filter(Boolean).map(encodeURIComponent).join("/");
+  const canonicalQuerystring = "";
+  const signedHeaders = "content-type;host;x-amz-date";
+  const canonicalHeaders = `content-type:application/json
+host:${host}
+x-amz-date:${timestamp}
+`;
+  const canonicalRequest = [
+    method,
+    canonicalUri,
+    canonicalQuerystring,
+    canonicalHeaders,
+    signedHeaders,
+    payloadHash
+  ].join("\n");
+  const credentialScope = `${dateStamp}/${region}/${service}/aws4_request`;
+  const stringToSign = [
+    "AWS4-HMAC-SHA256",
+    timestamp,
+    credentialScope,
+    await sha256(canonicalRequest)
+  ].join("\n");
+  const kDate = await hmac(enc.encode("AWS4" + secretKey), dateStamp);
+  const kRegion = await hmac(kDate, region);
+  const kService = await hmac(kRegion, service);
+  const kSigning = await hmac(kService, "aws4_request");
+  const signatureBuffer = await hmac(kSigning, stringToSign);
+  const signature = [...new Uint8Array(signatureBuffer)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  const authorization = `AWS4-HMAC-SHA256 Credential=${accessKey}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
+  return {
+    "Content-Type": "application/json",
+    "X-Amz-Date": timestamp,
+    Authorization: authorization
+  };
+}
+
 // src/embedding-provider.ts
 var OpenAIEmbeddingProvider = class {
   constructor(settings) {
@@ -1140,6 +1224,44 @@ var OpenAIEmbeddingProvider = class {
     if (!res.ok) throw new Error(`Embedding request failed: ${res.status} ${await res.text()}`);
     const json = await res.json();
     return json.data?.[0]?.embedding ?? [];
+  }
+};
+var BedrockEmbeddingProvider = class {
+  constructor(settings) {
+    this.settings = settings;
+  }
+  async embed(text, model) {
+    if (!this.settings.bedrockAccessKeyId || !this.settings.bedrockSecretAccessKey) {
+      throw new Error("AWS Bedrock credentials missing for embedding");
+    }
+    const region = this.settings.bedrockRegion;
+    const body = JSON.stringify({
+      inputText: text.slice(0, 2e4),
+      dimensions: 1024,
+      normalize: true
+    });
+    const host = `bedrock-runtime.${region}.amazonaws.com`;
+    const encodedPath = `/model/${encodeURIComponent(model)}/invoke`;
+    const url = new URL(`https://${host}${encodedPath}`);
+    const now = /* @__PURE__ */ new Date();
+    const timestamp = now.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
+    const headers = await signBedrockRequest(
+      "POST",
+      url,
+      body,
+      timestamp,
+      region,
+      this.settings.bedrockAccessKeyId,
+      this.settings.bedrockSecretAccessKey
+    );
+    const res = await fetch(`https://${host}${encodedPath}`, {
+      method: "POST",
+      headers,
+      body
+    });
+    if (!res.ok) throw new Error(`Bedrock embedding request failed: ${res.status} ${await res.text()}`);
+    const json = await res.json();
+    return json.embedding ?? [];
   }
 };
 var FallbackHashEmbeddingProvider = class {
@@ -1283,9 +1405,19 @@ var PersistentVectorIndex = class {
     await this.storage.save(this.cache);
   }
   async rebuild(chunks, model) {
-    this.cache = { version: 2, records: {} };
+    this.cache = { version: 2, embeddingProvider: this.cache?.embeddingProvider, records: {} };
     await this.storage.save(this.cache);
     return this.indexChunks(chunks, model);
+  }
+  async getStoredProvider() {
+    await this.ensureLoaded();
+    return this.cache?.embeddingProvider;
+  }
+  async setProvider(provider) {
+    await this.ensureLoaded();
+    if (!this.cache) throw new Error("Vector cache failed to initialize");
+    this.cache.embeddingProvider = provider;
+    await this.storage.save(this.cache);
   }
 };
 
@@ -1338,8 +1470,18 @@ var IndexingOrchestrator = class {
   }
   initializeVectorIndex() {
     const settings = this.getSettings();
-    const provider = settings.provider === "openai" ? new OpenAIEmbeddingProvider(settings) : new FallbackHashEmbeddingProvider();
+    const provider = this.buildEmbeddingProvider(settings);
     this.vectorIndex = new PersistentVectorIndex(new VaultVectorStorage(this.app), provider);
+  }
+  buildEmbeddingProvider(settings) {
+    switch (settings.embeddingProvider) {
+      case "openai":
+        return new OpenAIEmbeddingProvider(settings);
+      case "bedrock":
+        return new BedrockEmbeddingProvider(settings);
+      default:
+        return new FallbackHashEmbeddingProvider();
+    }
   }
   getVectorIndex() {
     if (!this.vectorIndex) this.initializeVectorIndex();
@@ -1357,8 +1499,11 @@ var IndexingOrchestrator = class {
     return Promise.all(files.map(async (f) => ({ path: f.path, content: await this.app.vault.read(f) })));
   }
   async rebuildPersistentIndex() {
+    const settings = this.getSettings();
+    const idx = this.getVectorIndex();
     const notes = await this.getAllNotes();
-    return this.getVectorIndex().rebuild(
+    const model = this.activeEmbeddingModel(settings);
+    const count = await idx.rebuild(
       notes.map((n) => ({
         id: `${n.path}#full`,
         path: n.path,
@@ -1366,8 +1511,20 @@ var IndexingOrchestrator = class {
 ${n.content}`,
         mtime: n.mtime
       })),
-      this.getSettings().embeddingModel
+      model
     );
+    await idx.setProvider(settings.embeddingProvider);
+    return count;
+  }
+  /** Returns the active embedding model name based on provider selection. */
+  activeEmbeddingModel(settings) {
+    return settings.embeddingProvider === "bedrock" ? settings.bedrockEmbeddingModel : settings.embeddingModel;
+  }
+  /** Check if the embedding provider has changed since last index build. */
+  async needsProviderRebuild() {
+    const idx = this.getVectorIndex();
+    const stored = await idx.getStoredProvider();
+    return stored !== void 0 && stored !== this.getSettings().embeddingProvider;
   }
   registerVaultSyncEvents(registerEvent) {
     registerEvent(
@@ -1379,7 +1536,7 @@ ${n.content}`,
           await syncIndexedNote(
             this.getVectorIndex(),
             { path: file.path, content, mtime: file.stat.mtime },
-            settings.embeddingModel,
+            this.activeEmbeddingModel(settings),
             settings.retrievalChunkSize
           );
         });
@@ -1480,65 +1637,6 @@ var BedrockClient = class {
   constructor(settings) {
     this.settings = settings;
   }
-  /** AWS Signature V4 signing for Bedrock invoke requests. */
-  async sign(method, url, body, timestamp) {
-    const region = this.settings.bedrockRegion;
-    const accessKey = this.settings.bedrockAccessKeyId;
-    const secretKey = this.settings.bedrockSecretAccessKey;
-    const service = "bedrock";
-    const dateStamp = timestamp.slice(0, 8);
-    const enc = new TextEncoder();
-    async function hmac(key, data) {
-      const cryptoKey = await crypto.subtle.importKey(
-        "raw",
-        key instanceof ArrayBuffer ? new Uint8Array(key) : key,
-        { name: "HMAC", hash: "SHA-256" },
-        false,
-        ["sign"]
-      );
-      return crypto.subtle.sign("HMAC", cryptoKey, enc.encode(data));
-    }
-    async function sha256(data) {
-      const digest = await crypto.subtle.digest("SHA-256", enc.encode(data));
-      return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
-    }
-    const payloadHash = await sha256(body);
-    const host = url.hostname;
-    const canonicalUri = "/" + url.pathname.split("/").filter(Boolean).map(encodeURIComponent).join("/");
-    const canonicalQuerystring = "";
-    const signedHeaders = "content-type;host;x-amz-date";
-    const canonicalHeaders = `content-type:application/json
-host:${host}
-x-amz-date:${timestamp}
-`;
-    const canonicalRequest = [
-      method,
-      canonicalUri,
-      canonicalQuerystring,
-      canonicalHeaders,
-      signedHeaders,
-      payloadHash
-    ].join("\n");
-    const credentialScope = `${dateStamp}/${region}/${service}/aws4_request`;
-    const stringToSign = [
-      "AWS4-HMAC-SHA256",
-      timestamp,
-      credentialScope,
-      await sha256(canonicalRequest)
-    ].join("\n");
-    const kDate = await hmac(enc.encode("AWS4" + secretKey), dateStamp);
-    const kRegion = await hmac(kDate, region);
-    const kService = await hmac(kRegion, service);
-    const kSigning = await hmac(kService, "aws4_request");
-    const signatureBuffer = await hmac(kSigning, stringToSign);
-    const signature = [...new Uint8Array(signatureBuffer)].map((b) => b.toString(16).padStart(2, "0")).join("");
-    const authorization = `AWS4-HMAC-SHA256 Credential=${accessKey}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
-    return {
-      "Content-Type": "application/json",
-      "X-Amz-Date": timestamp,
-      Authorization: authorization
-    };
-  }
   async chat(prompt, system = "You are a helpful note assistant.") {
     if (!this.settings.allowRemoteModels) {
       throw new Error("Remote model calls are disabled in settings");
@@ -1560,7 +1658,15 @@ x-amz-date:${timestamp}
     const url = new URL(`https://${host}${encodedPath}`);
     const now = /* @__PURE__ */ new Date();
     const timestamp = now.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
-    const headers = await this.sign("POST", url, body, timestamp);
+    const headers = await signBedrockRequest(
+      "POST",
+      url,
+      body,
+      timestamp,
+      region,
+      this.settings.bedrockAccessKeyId,
+      this.settings.bedrockSecretAccessKey
+    );
     const response = await fetch(`https://${host}${encodedPath}`, {
       method: "POST",
       headers,
