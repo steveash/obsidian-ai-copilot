@@ -1,5 +1,6 @@
-import type { App, TFile, WorkspaceLeaf } from "obsidian";
-import { ItemView, Notice } from "obsidian";
+import type { WorkspaceLeaf } from "obsidian";
+import { ItemView, Notice, TFile } from "obsidian";
+import type { VaultAdapter } from "./vault-adapter";
 
 export const AI_COPILOT_VIEW = "ai-copilot-chat-view";
 
@@ -18,7 +19,7 @@ export class AICopilotChatView extends ItemView {
   private messages: ChatMessage[] = [];
   private onSubmit: ((query: string) => Promise<ChatMessage>) | null = null;
 
-  constructor(leaf: WorkspaceLeaf, private readonly appRef: App) {
+  constructor(leaf: WorkspaceLeaf) {
     super(leaf);
   }
 
@@ -39,9 +40,9 @@ export class AICopilotChatView extends ItemView {
   }
 
   private async openCitation(path: string) {
-    const file = this.appRef.vault.getAbstractFileByPath(path);
+    const file = this.app.vault.getAbstractFileByPath(path);
     if (file && "path" in file) {
-      await this.appRef.workspace.getLeaf(true).openFile(file as TFile);
+      await this.app.workspace.getLeaf(true).openFile(file as TFile);
       return;
     }
     new Notice(`AI Copilot: source not found (${path})`);
@@ -97,19 +98,14 @@ export class AICopilotChatView extends ItemView {
   }
 }
 
-export async function upsertChatOutput(app: App, text: string): Promise<TFile> {
+export async function upsertChatOutput(vault: VaultAdapter, text: string): Promise<void> {
   const path = "AI Copilot/Chat Output.md";
-  const existing = app.vault.getAbstractFileByPath(path);
-  let file: TFile;
-  if (existing && "path" in existing) {
-    file = existing as TFile;
-  } else {
-    if (!app.vault.getAbstractFileByPath("AI Copilot")) {
-      await app.vault.createFolder("AI Copilot");
+  if (!vault.exists(path)) {
+    if (!vault.exists("AI Copilot")) {
+      await vault.createFolder("AI Copilot");
     }
-    file = await app.vault.create(path, "# Chat Output\n");
+    await vault.create(path, "# Chat Output\n");
   }
 
-  await app.vault.append(file, `\n\n---\n${new Date().toISOString()}\n${text}\n`);
-  return file;
+  await vault.append(path, `\n\n---\n${new Date().toISOString()}\n${text}\n`);
 }
