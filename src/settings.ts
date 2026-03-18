@@ -30,6 +30,8 @@ export interface AICopilotSettings {
   rerankerTopK: number;
   rerankerType: "openai" | "heuristic";
   rerankerModel: string;
+  agentMaxToolCalls: number;
+  agentTimeoutMs: number;
   allowRemoteModels: boolean;
   redactSensitiveLogs: boolean;
   maxPromptChars: number;
@@ -67,6 +69,8 @@ export const DEFAULT_SETTINGS: AICopilotSettings = {
   rerankerTopK: 8,
   rerankerType: "openai",
   rerankerModel: "gpt-4.1-mini",
+  agentMaxToolCalls: 10,
+  agentTimeoutMs: 60000,
   allowRemoteModels: true,
   redactSensitiveLogs: true,
   maxPromptChars: 20000,
@@ -440,6 +444,36 @@ export class AICopilotSettingTab extends PluginSettingTab {
           this.plugin.settings.rerankerModel = value.trim() || "gpt-4.1-mini";
           await this.plugin.saveSettings();
         })
+      );
+
+    containerEl.createEl("h3", { text: "Agent Behavior" });
+
+    new Setting(containerEl)
+      .setName("Max tool calls per query")
+      .setDesc("Maximum number of tool invocations the agent can make per chat query")
+      .addSlider((s) =>
+        s
+          .setLimits(1, 30, 1)
+          .setValue(this.plugin.settings.agentMaxToolCalls)
+          .setDynamicTooltip()
+          .onChange(async (value) => {
+            this.plugin.settings.agentMaxToolCalls = value;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Agent timeout (seconds)")
+      .setDesc("Maximum time for the agent loop before aborting")
+      .addSlider((s) =>
+        s
+          .setLimits(10, 300, 10)
+          .setValue(Math.round(this.plugin.settings.agentTimeoutMs / 1000))
+          .setDynamicTooltip()
+          .onChange(async (value) => {
+            this.plugin.settings.agentTimeoutMs = value * 1000;
+            await this.plugin.saveSettings();
+          })
       );
 
     containerEl.createEl("h3", { text: "Security + Validation" });

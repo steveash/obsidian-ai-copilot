@@ -1,9 +1,11 @@
 import { Notice, type App, type TFile, type WorkspaceLeaf } from "obsidian";
-import { buildClient } from "./llm";
+import { buildClient, buildAgentClient } from "./llm";
 import { AICopilotChatView, AI_COPILOT_VIEW, upsertChatOutput, type ChatMessage } from "./chat";
 import type { AICopilotSettings } from "./settings";
 import type { RetrievedNote } from "./semantic-retrieval";
 import type { VaultAdapter } from "./vault-adapter";
+import { runAgentLoop } from "./agent-loop";
+import type { AgentToolContext } from "./agent-tools";
 
 export class ChatOrchestrator {
   constructor(
@@ -16,6 +18,14 @@ export class ChatOrchestrator {
 
   registerView(registerView: (type: string, cb: (leaf: WorkspaceLeaf) => AICopilotChatView) => void) {
     registerView(AI_COPILOT_VIEW, (leaf) => new AICopilotChatView(leaf));
+  }
+
+  private buildToolContext(settings: AICopilotSettings): AgentToolContext {
+    return {
+      vault: this.vault,
+      searchNotes: (query, maxResults) => this.getRelevantNotes(query, maxResults),
+      maxSearchResults: settings.chatMaxResults
+    };
   }
 
   async activateChatView() {
@@ -35,6 +45,34 @@ export class ChatOrchestrator {
     if (view instanceof AICopilotChatView) {
       view.setSubmitHandler(async (query: string): Promise<ChatMessage> => {
         const settings = this.getSettings();
+        const agentClient = buildAgentClient(settings);
+
+        if (agentClient) {
+          const toolCtx = this.buildToolContext(settings);
+          const result = await runAgentLoop(
+            agentClient,
+            query,
+            toolCtx,
+            settings,
+            {
+              onToolCall: (name) => view.showToolProgress(name),
+              onText: () => view.clearToolProgress()
+            }
+          );
+
+          await upsertChatOutput(
+            this.vault,
+            `## Query\n${query}\n\n## Response\n${result.text}`
+          );
+
+          return {
+            role: "assistant",
+            text: result.text,
+            citations: result.citations
+          };
+        }
+
+        // Fallback: non-agent providers (OpenAI, dry-run)
         const related = await this.getRelevantNotes(query, settings.chatMaxResults);
         const context = related.map((n) => `### ${n.path}\n${n.content.slice(0, 1200)}`).join("\n\n");
         const prompt = `Question: ${query}\n\nUse these notes:\n\n${context}`;
@@ -68,6 +106,20 @@ export class ChatOrchestrator {
 
   async chatQuery(query: string) {
     const settings = this.getSettings();
+    const agentClient = buildAgentClient(settings);
+
+    if (agentClient) {
+      const toolCtx = this.buildToolContext(settings);
+      const result = await runAgentLoop(agentClient, query, toolCtx, settings);
+      await upsertChatOutput(
+        this.vault,
+        `## Query\n${query}\n\n## Response\n${result.text}`
+      );
+      new Notice("AI Copilot: query response saved.");
+      return;
+    }
+
+    // Fallback: non-agent providers
     const related = await this.getRelevantNotes(query, settings.chatMaxResults);
     const context = related.map((n) => `### ${n.path}\n${n.content.slice(0, 1200)}`).join("\n\n");
     const prompt = `Question: ${query}\n\nUse these notes:\n\n${context}`;

@@ -40,6 +40,8 @@ const BASE: AICopilotSettings = {
   allowRemoteModels: true,
   redactSensitiveLogs: true,
   maxPromptChars: 20000,
+  agentMaxToolCalls: 10,
+  agentTimeoutMs: 60000,
   strictConfigValidation: true,
   enrichmentConfidenceThreshold: 0.6,
   enrichmentDestructiveRewriteThreshold: 0.3,

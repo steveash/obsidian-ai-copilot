@@ -484,6 +484,8 @@ var DEFAULT_SETTINGS = {
   rerankerTopK: 8,
   rerankerType: "openai",
   rerankerModel: "gpt-4.1-mini",
+  agentMaxToolCalls: 10,
+  agentTimeoutMs: 6e4,
   allowRemoteModels: true,
   redactSensitiveLogs: true,
   maxPromptChars: 2e4,
@@ -674,6 +676,19 @@ var AICopilotSettingTab = class extends import_obsidian.PluginSettingTab {
     new import_obsidian.Setting(containerEl).setName("Reranker model").setDesc("OpenAI model used for reranking").addText(
       (t) => t.setValue(this.plugin.settings.rerankerModel).onChange(async (value) => {
         this.plugin.settings.rerankerModel = value.trim() || "gpt-4.1-mini";
+        await this.plugin.saveSettings();
+      })
+    );
+    containerEl.createEl("h3", { text: "Agent Behavior" });
+    new import_obsidian.Setting(containerEl).setName("Max tool calls per query").setDesc("Maximum number of tool invocations the agent can make per chat query").addSlider(
+      (s) => s.setLimits(1, 30, 1).setValue(this.plugin.settings.agentMaxToolCalls).setDynamicTooltip().onChange(async (value) => {
+        this.plugin.settings.agentMaxToolCalls = value;
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian.Setting(containerEl).setName("Agent timeout (seconds)").setDesc("Maximum time for the agent loop before aborting").addSlider(
+      (s) => s.setLimits(10, 300, 10).setValue(Math.round(this.plugin.settings.agentTimeoutMs / 1e3)).setDynamicTooltip().onChange(async (value) => {
+        this.plugin.settings.agentTimeoutMs = value * 1e3;
         await this.plugin.saveSettings();
       })
     );
@@ -1653,6 +1668,41 @@ var AnthropicClient = class {
     const json = await response.json();
     return json.content?.find((b) => b.type === "text")?.text?.trim() || "";
   }
+  async chatMessages(messages, system, tools, maxTokens) {
+    if (!this.settings.allowRemoteModels) {
+      throw new Error("Remote model calls are disabled in settings");
+    }
+    if (!this.settings.anthropicApiKey) {
+      throw new Error("Anthropic API key missing in plugin settings");
+    }
+    const body = {
+      model: this.settings.anthropicModel,
+      max_tokens: maxTokens,
+      system,
+      messages
+    };
+    if (tools.length > 0) {
+      body.tools = tools;
+    }
+    const response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": this.settings.anthropicApiKey,
+        "anthropic-version": "2023-06-01"
+      },
+      body: JSON.stringify(body)
+    });
+    if (!response.ok) {
+      const detail = redactSensitive(await response.text());
+      throw new Error(`Anthropic request failed: ${response.status} ${detail}`);
+    }
+    const json = await response.json();
+    return {
+      content: json.content ?? [],
+      stop_reason: json.stop_reason ?? "end_turn"
+    };
+  }
 };
 var BedrockClient = class {
   constructor(settings) {
@@ -1700,6 +1750,54 @@ var BedrockClient = class {
     const json = await response.json();
     return json.content?.find((b) => b.type === "text")?.text?.trim() || "";
   }
+  async chatMessages(messages, system, tools, maxTokens) {
+    if (!this.settings.allowRemoteModels) {
+      throw new Error("Remote model calls are disabled in settings");
+    }
+    if (!this.settings.bedrockAccessKeyId || !this.settings.bedrockSecretAccessKey) {
+      throw new Error("AWS Bedrock credentials missing in plugin settings");
+    }
+    const region = this.settings.bedrockRegion;
+    const model = this.settings.bedrockModel;
+    const requestBody = {
+      anthropic_version: "bedrock-2023-05-31",
+      max_tokens: maxTokens,
+      system,
+      messages
+    };
+    if (tools.length > 0) {
+      requestBody.tools = tools;
+    }
+    const body = JSON.stringify(requestBody);
+    const host = `bedrock-runtime.${region}.amazonaws.com`;
+    const encodedPath = `/model/${encodeURIComponent(model)}/invoke`;
+    const url = new URL(`https://${host}${encodedPath}`);
+    const now = /* @__PURE__ */ new Date();
+    const timestamp = now.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
+    const headers = await signBedrockRequest(
+      "POST",
+      url,
+      body,
+      timestamp,
+      region,
+      this.settings.bedrockAccessKeyId,
+      this.settings.bedrockSecretAccessKey
+    );
+    const response = await fetch(`https://${host}${encodedPath}`, {
+      method: "POST",
+      headers,
+      body
+    });
+    if (!response.ok) {
+      const detail = redactSensitive(await response.text());
+      throw new Error(`Bedrock request failed: ${response.status} ${detail}`);
+    }
+    const json = await response.json();
+    return {
+      content: json.content ?? [],
+      stop_reason: json.stop_reason ?? "end_turn"
+    };
+  }
 };
 function buildClient(settings) {
   if (!settings.allowRemoteModels) return new DryRunClient();
@@ -1714,15 +1812,32 @@ function buildClient(settings) {
       return new DryRunClient();
   }
 }
+function buildAgentClient(settings) {
+  if (!settings.allowRemoteModels) return null;
+  switch (settings.provider) {
+    case "anthropic":
+      return new AnthropicClient(settings);
+    case "bedrock":
+      return new BedrockClient(settings);
+    default:
+      return null;
+  }
+}
 
 // src/chat.ts
 var import_obsidian2 = require("obsidian");
 var AI_COPILOT_VIEW = "ai-copilot-chat-view";
+var TOOL_LABELS = {
+  search_notes: "Searching vault...",
+  read_note: "Reading note...",
+  list_notes: "Listing notes..."
+};
 var AICopilotChatView = class extends import_obsidian2.ItemView {
   constructor(leaf) {
     super(leaf);
     this.messages = [];
     this.onSubmit = null;
+    this.toolProgressEl = null;
   }
   getViewType() {
     return AI_COPILOT_VIEW;
@@ -1732,6 +1847,17 @@ var AICopilotChatView = class extends import_obsidian2.ItemView {
   }
   setSubmitHandler(handler) {
     this.onSubmit = handler;
+  }
+  showToolProgress(toolName) {
+    if (!this.toolProgressEl) return;
+    const label = TOOL_LABELS[toolName] ?? `Running ${toolName}...`;
+    this.toolProgressEl.setText(label);
+    this.toolProgressEl.style.display = "block";
+  }
+  clearToolProgress() {
+    if (!this.toolProgressEl) return;
+    this.toolProgressEl.style.display = "none";
+    this.toolProgressEl.setText("");
   }
   async onOpen() {
     this.render();
@@ -1770,6 +1896,11 @@ var AICopilotChatView = class extends import_obsidian2.ItemView {
         }
       }
     }
+    this.toolProgressEl = root.createDiv({ cls: "ai-copilot-tool-progress" });
+    this.toolProgressEl.style.display = "none";
+    this.toolProgressEl.style.padding = "4px 8px";
+    this.toolProgressEl.style.fontStyle = "italic";
+    this.toolProgressEl.style.opacity = "0.7";
     const form = root.createEl("form");
     const input = form.createEl("input", { type: "text", placeholder: "Ask about your notes..." });
     input.style.width = "80%";
@@ -1804,6 +1935,173 @@ ${text}
 `);
 }
 
+// src/agent-tools.ts
+var AGENT_TOOLS = [
+  {
+    name: "search_notes",
+    description: "Search the vault for notes relevant to a query. Returns note paths, scores, and content previews. Use this to find information across the vault.",
+    input_schema: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description: "The search query to find relevant notes"
+        }
+      },
+      required: ["query"]
+    }
+  },
+  {
+    name: "read_note",
+    description: "Read the full content of a specific note by its file path. Use this after search_notes to get the complete text of a relevant note.",
+    input_schema: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description: "The file path of the note to read (e.g. 'Projects/my-note.md')"
+        }
+      },
+      required: ["path"]
+    }
+  },
+  {
+    name: "list_notes",
+    description: "List all markdown files in the vault. Returns file paths and modification times. Optionally filter by folder prefix.",
+    input_schema: {
+      type: "object",
+      properties: {
+        folder: {
+          type: "string",
+          description: "Optional folder prefix to filter results (e.g. 'Projects/')"
+        }
+      }
+    }
+  }
+];
+async function executeTool(name, input, ctx) {
+  switch (name) {
+    case "search_notes":
+      return executeSearchNotes(input, ctx);
+    case "read_note":
+      return executeReadNote(input, ctx);
+    case "list_notes":
+      return executeListNotes(input, ctx);
+    default:
+      return { content: `Unknown tool: ${name}`, is_error: true };
+  }
+}
+async function executeSearchNotes(input, ctx) {
+  const query = String(input.query ?? "");
+  if (!query) return { content: "Error: query is required", is_error: true };
+  const results = await ctx.searchNotes(query, ctx.maxSearchResults);
+  if (results.length === 0) {
+    return { content: "No matching notes found." };
+  }
+  const formatted = results.map((n) => {
+    const preview = n.content.slice(0, 500).replace(/\n{3,}/g, "\n\n");
+    return `### ${n.path} (score: ${n.score.toFixed(2)})
+${preview}`;
+  });
+  return { content: formatted.join("\n\n---\n\n") };
+}
+async function executeReadNote(input, ctx) {
+  const path = String(input.path ?? "");
+  if (!path) return { content: "Error: path is required", is_error: true };
+  if (!ctx.vault.exists(path)) {
+    return { content: `Note not found: ${path}`, is_error: true };
+  }
+  const content = await ctx.vault.read(path);
+  return { content };
+}
+async function executeListNotes(input, ctx) {
+  const folder = input.folder ? String(input.folder) : void 0;
+  let files = ctx.vault.listMarkdownFiles();
+  if (folder) {
+    files = files.filter((f) => f.path.startsWith(folder));
+  }
+  if (files.length === 0) {
+    return { content: folder ? `No notes found in folder: ${folder}` : "No notes in vault." };
+  }
+  const lines = files.sort((a, b) => b.mtime - a.mtime).slice(0, 100).map((f) => `- ${f.path} (modified: ${new Date(f.mtime).toISOString().slice(0, 10)})`);
+  if (files.length > 100) {
+    lines.push(`
+... and ${files.length - 100} more files`);
+  }
+  return { content: lines.join("\n") };
+}
+
+// src/agent-loop.ts
+var AGENT_SYSTEM_PROMPT = "You are an AI assistant integrated into an Obsidian vault. You help users understand, search, and navigate their notes.\n\nYou have tools to search, read, and list notes in the vault. Use them to find relevant information before answering. Always ground your answers in the actual note content.\n\nWhen citing information, mention the note path so the user can find it. If you cannot find relevant information in the vault, say so honestly.\n\nBe concise and helpful. Focus on answering the user's question using vault content.";
+async function runAgentLoop(client, query, toolCtx, settings, callbacks) {
+  const maxToolCalls = settings.agentMaxToolCalls;
+  const messages = [{ role: "user", content: query }];
+  const citedPaths = /* @__PURE__ */ new Map();
+  let toolCallCount = 0;
+  for (let i = 0; i < maxToolCalls + 1; i++) {
+    const response = await client.chatMessages(
+      messages,
+      AGENT_SYSTEM_PROMPT,
+      AGENT_TOOLS,
+      4096
+    );
+    if (response.stop_reason === "end_turn" || response.stop_reason === "max_tokens") {
+      const text2 = extractText(response.content);
+      callbacks?.onText?.(text2);
+      return {
+        text: text2,
+        citations: buildCitations(citedPaths),
+        toolCallCount
+      };
+    }
+    if (response.stop_reason !== "tool_use") {
+      const text2 = extractText(response.content);
+      callbacks?.onText?.(text2);
+      return { text: text2, citations: buildCitations(citedPaths), toolCallCount };
+    }
+    messages.push({ role: "assistant", content: response.content });
+    const toolUseBlocks = response.content.filter(
+      (b) => b.type === "tool_use" && !!b.id && !!b.name
+    );
+    const resultBlocks = [];
+    for (const block of toolUseBlocks) {
+      toolCallCount++;
+      callbacks?.onToolCall?.(block.name, block.input);
+      const result = await executeTool(block.name, block.input, toolCtx);
+      callbacks?.onToolResult?.(block.name, result);
+      trackCitations(block.name, block.input, citedPaths);
+      resultBlocks.push({
+        type: "tool_result",
+        tool_use_id: block.id,
+        content: result.content,
+        is_error: result.is_error
+      });
+    }
+    messages.push({ role: "user", content: resultBlocks });
+  }
+  const finalResponse = await client.chatMessages(
+    messages,
+    AGENT_SYSTEM_PROMPT,
+    AGENT_TOOLS,
+    4096
+  );
+  const text = extractText(finalResponse.content);
+  callbacks?.onText?.(text);
+  return { text, citations: buildCitations(citedPaths), toolCallCount };
+}
+function extractText(content) {
+  return content.filter((b) => b.type === "text" && b.text).map((b) => b.text).join("\n");
+}
+function trackCitations(toolName, input, citedPaths) {
+  if (toolName === "read_note" && typeof input.path === "string") {
+    const current = citedPaths.get(input.path) ?? 0;
+    citedPaths.set(input.path, current + 1);
+  }
+}
+function buildCitations(citedPaths) {
+  return [...citedPaths.entries()].sort((a, b) => b[1] - a[1]).map(([path]) => ({ path }));
+}
+
 // src/chat-orchestrator.ts
 var ChatOrchestrator = class {
   constructor(app, vault, getSettings, getRelevantNotes, writeAssistantOutput) {
@@ -1815,6 +2113,13 @@ var ChatOrchestrator = class {
   }
   registerView(registerView) {
     registerView(AI_COPILOT_VIEW, (leaf) => new AICopilotChatView(leaf));
+  }
+  buildToolContext(settings) {
+    return {
+      vault: this.vault,
+      searchNotes: (query, maxResults) => this.getRelevantNotes(query, maxResults),
+      maxSearchResults: settings.chatMaxResults
+    };
   }
   async activateChatView() {
     const { workspace } = this.app;
@@ -1832,6 +2137,33 @@ var ChatOrchestrator = class {
     if (view instanceof AICopilotChatView) {
       view.setSubmitHandler(async (query) => {
         const settings = this.getSettings();
+        const agentClient = buildAgentClient(settings);
+        if (agentClient) {
+          const toolCtx = this.buildToolContext(settings);
+          const result = await runAgentLoop(
+            agentClient,
+            query,
+            toolCtx,
+            settings,
+            {
+              onToolCall: (name) => view.showToolProgress(name),
+              onText: () => view.clearToolProgress()
+            }
+          );
+          await upsertChatOutput(
+            this.vault,
+            `## Query
+${query}
+
+## Response
+${result.text}`
+          );
+          return {
+            role: "assistant",
+            text: result.text,
+            citations: result.citations
+          };
+        }
         const related = await this.getRelevantNotes(query, settings.chatMaxResults);
         const context = related.map((n) => `### ${n.path}
 ${n.content.slice(0, 1200)}`).join("\n\n");
@@ -1872,6 +2204,21 @@ ${n.content.slice(0, 500)}`),
   }
   async chatQuery(query) {
     const settings = this.getSettings();
+    const agentClient = buildAgentClient(settings);
+    if (agentClient) {
+      const toolCtx = this.buildToolContext(settings);
+      const result = await runAgentLoop(agentClient, query, toolCtx, settings);
+      await upsertChatOutput(
+        this.vault,
+        `## Query
+${query}
+
+## Response
+${result.text}`
+      );
+      new import_obsidian3.Notice("AI Copilot: query response saved.");
+      return;
+    }
     const related = await this.getRelevantNotes(query, settings.chatMaxResults);
     const context = related.map((n) => `### ${n.path}
 ${n.content.slice(0, 1200)}`).join("\n\n");

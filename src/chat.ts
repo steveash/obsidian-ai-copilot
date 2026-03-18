@@ -4,6 +4,12 @@ import type { VaultAdapter } from "./vault-adapter";
 
 export const AI_COPILOT_VIEW = "ai-copilot-chat-view";
 
+const TOOL_LABELS: Record<string, string> = {
+  search_notes: "Searching vault...",
+  read_note: "Reading note...",
+  list_notes: "Listing notes..."
+};
+
 export interface ChatCitation {
   path: string;
   score?: number;
@@ -18,6 +24,7 @@ export interface ChatMessage {
 export class AICopilotChatView extends ItemView {
   private messages: ChatMessage[] = [];
   private onSubmit: ((query: string) => Promise<ChatMessage>) | null = null;
+  private toolProgressEl: HTMLElement | null = null;
 
   constructor(leaf: WorkspaceLeaf) {
     super(leaf);
@@ -33,6 +40,19 @@ export class AICopilotChatView extends ItemView {
 
   setSubmitHandler(handler: (query: string) => Promise<ChatMessage>) {
     this.onSubmit = handler;
+  }
+
+  showToolProgress(toolName: string) {
+    if (!this.toolProgressEl) return;
+    const label = TOOL_LABELS[toolName] ?? `Running ${toolName}...`;
+    this.toolProgressEl.setText(label);
+    this.toolProgressEl.style.display = "block";
+  }
+
+  clearToolProgress() {
+    if (!this.toolProgressEl) return;
+    this.toolProgressEl.style.display = "none";
+    this.toolProgressEl.setText("");
   }
 
   async onOpen() {
@@ -77,6 +97,12 @@ export class AICopilotChatView extends ItemView {
         }
       }
     }
+
+    this.toolProgressEl = root.createDiv({ cls: "ai-copilot-tool-progress" });
+    this.toolProgressEl.style.display = "none";
+    this.toolProgressEl.style.padding = "4px 8px";
+    this.toolProgressEl.style.fontStyle = "italic";
+    this.toolProgressEl.style.opacity = "0.7";
 
     const form = root.createEl("form");
     const input = form.createEl("input", { type: "text", placeholder: "Ask about your notes..." });
