@@ -34,6 +34,9 @@ export interface AICopilotSettings {
   redactSensitiveLogs: boolean;
   maxPromptChars: number;
   strictConfigValidation: boolean;
+  enrichmentConfidenceThreshold: number;
+  enrichmentDestructiveRewriteThreshold: number;
+  enrichmentPersistState: boolean;
 }
 
 export const DEFAULT_SETTINGS: AICopilotSettings = {
@@ -67,7 +70,10 @@ export const DEFAULT_SETTINGS: AICopilotSettings = {
   allowRemoteModels: true,
   redactSensitiveLogs: true,
   maxPromptChars: 20000,
-  strictConfigValidation: true
+  strictConfigValidation: true,
+  enrichmentConfidenceThreshold: 0.6,
+  enrichmentDestructiveRewriteThreshold: 0.3,
+  enrichmentPersistState: true
 };
 
 function parseProvider(value: string): AICopilotSettings["provider"] {
@@ -478,6 +484,44 @@ export class AICopilotSettingTab extends PluginSettingTab {
         tg.setValue(this.plugin.settings.strictConfigValidation).onChange(async (value) => {
           this.plugin.settings.strictConfigValidation = value;
           await this.plugin.saveSettings();
+        })
+      );
+
+    containerEl.createEl("h3", { text: "Enrichment State" });
+
+    new Setting(containerEl)
+      .setName("Persist enrichment state")
+      .setDesc("Track per-note enrichment state in sidecar files")
+      .addToggle((tg) =>
+        tg.setValue(this.plugin.settings.enrichmentPersistState).onChange(async (value) => {
+          this.plugin.settings.enrichmentPersistState = value;
+          await this.plugin.saveSettings();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Enrichment confidence threshold")
+      .setDesc("Below this average confidence, notes require human review (0.0–1.0)")
+      .addText((t) =>
+        t.setValue(String(this.plugin.settings.enrichmentConfidenceThreshold)).onChange(async (value) => {
+          const n = Number(value);
+          if (Number.isFinite(n) && n >= 0 && n <= 1) {
+            this.plugin.settings.enrichmentConfidenceThreshold = n;
+            await this.plugin.saveSettings();
+          }
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Destructive rewrite threshold")
+      .setDesc("Above this content-change ratio, notes require human review (0.0–1.0)")
+      .addText((t) =>
+        t.setValue(String(this.plugin.settings.enrichmentDestructiveRewriteThreshold)).onChange(async (value) => {
+          const n = Number(value);
+          if (Number.isFinite(n) && n >= 0 && n <= 1) {
+            this.plugin.settings.enrichmentDestructiveRewriteThreshold = n;
+            await this.plugin.saveSettings();
+          }
         })
       );
   }

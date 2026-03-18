@@ -487,7 +487,10 @@ var DEFAULT_SETTINGS = {
   allowRemoteModels: true,
   redactSensitiveLogs: true,
   maxPromptChars: 2e4,
-  strictConfigValidation: true
+  strictConfigValidation: true,
+  enrichmentConfidenceThreshold: 0.6,
+  enrichmentDestructiveRewriteThreshold: 0.3,
+  enrichmentPersistState: true
 };
 function parseProvider(value) {
   if (value === "openai" || value === "anthropic" || value === "bedrock") return value;
@@ -700,6 +703,31 @@ var AICopilotSettingTab = class extends import_obsidian.PluginSettingTab {
       (tg) => tg.setValue(this.plugin.settings.strictConfigValidation).onChange(async (value) => {
         this.plugin.settings.strictConfigValidation = value;
         await this.plugin.saveSettings();
+      })
+    );
+    containerEl.createEl("h3", { text: "Enrichment State" });
+    new import_obsidian.Setting(containerEl).setName("Persist enrichment state").setDesc("Track per-note enrichment state in sidecar files").addToggle(
+      (tg) => tg.setValue(this.plugin.settings.enrichmentPersistState).onChange(async (value) => {
+        this.plugin.settings.enrichmentPersistState = value;
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian.Setting(containerEl).setName("Enrichment confidence threshold").setDesc("Below this average confidence, notes require human review (0.0\u20131.0)").addText(
+      (t) => t.setValue(String(this.plugin.settings.enrichmentConfidenceThreshold)).onChange(async (value) => {
+        const n = Number(value);
+        if (Number.isFinite(n) && n >= 0 && n <= 1) {
+          this.plugin.settings.enrichmentConfidenceThreshold = n;
+          await this.plugin.saveSettings();
+        }
+      })
+    );
+    new import_obsidian.Setting(containerEl).setName("Destructive rewrite threshold").setDesc("Above this content-change ratio, notes require human review (0.0\u20131.0)").addText(
+      (t) => t.setValue(String(this.plugin.settings.enrichmentDestructiveRewriteThreshold)).onChange(async (value) => {
+        const n = Number(value);
+        if (Number.isFinite(n) && n >= 0 && n <= 1) {
+          this.plugin.settings.enrichmentDestructiveRewriteThreshold = n;
+          await this.plugin.saveSettings();
+        }
       })
     );
   }

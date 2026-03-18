@@ -32,7 +32,10 @@ const BASE_SETTINGS = {
   allowRemoteModels: true,
   redactSensitiveLogs: true,
   maxPromptChars: 20000,
-  strictConfigValidation: true
+  strictConfigValidation: true,
+  enrichmentConfidenceThreshold: 0.6,
+  enrichmentDestructiveRewriteThreshold: 0.3,
+  enrichmentPersistState: true
 };
 
 describe("settings validation", () => {
