@@ -104,6 +104,8 @@ const BASE_SETTINGS: AICopilotSettings = {
   enrichmentConfidenceThreshold: 0.6,
   enrichmentDestructiveRewriteThreshold: 0.3,
   enrichmentPersistState: true,
+  enrichmentEnabled: false,
+  enrichmentDebounceSec: 5,
 };
 
 function makeSettings(overrides: Partial<AICopilotSettings> = {}): AICopilotSettings {
@@ -358,20 +360,70 @@ describe("Agent Tool Execution on Fixture Vault", () => {
     });
   });
 
-  describe("unknown tool guardrail", () => {
+  describe("tool guardrails", () => {
     it("rejects unknown tool names", async () => {
       const result = await executeTool("delete_note", {}, ctx);
       expect(result.is_error).toBe(true);
       expect(result.content).toContain("Unknown tool");
     });
 
-    it("rejects write_note (tools are read-only)", async () => {
+    it("write_note blocks protected paths", async () => {
       const result = await executeTool(
         "write_note",
-        { path: "test.md", content: "hack" },
+        { path: ".obsidian/config.json", content: "hack" },
         ctx
       );
       expect(result.is_error).toBe(true);
+    });
+
+    it("write_note blocks path traversal", async () => {
+      const result = await executeTool(
+        "write_note",
+        { path: "../outside-vault.md", content: "escape" },
+        ctx
+      );
+      expect(result.is_error).toBe(true);
+    });
+
+    it("edit_note blocks edits on nonexistent notes", async () => {
+      const result = await executeTool(
+        "edit_note",
+        { path: "nonexistent.md", find: "a", replace: "b" },
+        ctx
+      );
+      expect(result.is_error).toBe(true);
+      expect(result.content).toContain("not found");
+    });
+
+    it("write_note creates new notes successfully", async () => {
+      const result = await executeTool(
+        "write_note",
+        { path: "NewFolder/test-note.md", content: "# Test\nNew content." },
+        ctx
+      );
+      expect(result.is_error).toBeUndefined();
+      expect(result.content).toContain("created");
+
+      const content = await vault.read("NewFolder/test-note.md");
+      expect(content).toBe("# Test\nNew content.");
+    });
+
+    it("edit_note applies targeted edits with guardrails", async () => {
+      const result = await executeTool(
+        "edit_note",
+        {
+          path: "Projects/webapp-redesign.md",
+          find: "Complete redesign",
+          replace: "Full redesign",
+        },
+        ctx
+      );
+      expect(result.is_error).toBeUndefined();
+      expect(result.content).toContain("edited");
+
+      const content = await vault.read("Projects/webapp-redesign.md");
+      expect(content).toContain("Full redesign");
+      expect(content).not.toContain("Complete redesign");
     });
   });
 });
