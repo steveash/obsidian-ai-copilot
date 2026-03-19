@@ -434,7 +434,7 @@ __export(main_exports, {
   default: () => AICopilotPlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian6 = require("obsidian");
+var import_obsidian7 = require("obsidian");
 init_patch_plan();
 
 // src/safety.ts
@@ -2389,7 +2389,7 @@ ${output}`);
 };
 
 // src/command-registration.ts
-var import_obsidian4 = require("obsidian");
+var import_obsidian5 = require("obsidian");
 
 // src/refinement.ts
 function extractTodos(markdown) {
@@ -2787,272 +2787,337 @@ TODOs found: ${preview.todoCount}`);
   return lines.join("\n");
 }
 
-// src/command-registration.ts
-function registerPluginCommands(ctx, chat, indexing) {
-  ctx.addCommand({
-    id: "ai-copilot-open-chat-panel",
-    name: "AI Copilot: Open chat panel",
-    callback: async () => {
-      await chat.activateChatView();
+// src/cross-note-analysis.ts
+function parseFrontmatter(content) {
+  const fields = /* @__PURE__ */ new Map();
+  if (!content.startsWith("---")) return fields;
+  const endIdx = content.indexOf("\n---", 3);
+  if (endIdx < 0) return fields;
+  const yaml = content.slice(4, endIdx);
+  for (const line of yaml.split("\n")) {
+    const colonIdx = line.indexOf(":");
+    if (colonIdx <= 0) continue;
+    const key = line.slice(0, colonIdx).trim();
+    const value = line.slice(colonIdx + 1).trim();
+    if (key && !key.startsWith("#")) {
+      fields.set(key, value);
     }
-  });
-  ctx.addCommand({
-    id: "ai-copilot-chat-active-note",
-    name: "AI Copilot: Chat about active note",
-    callback: async () => {
-      const file = ctx.app.workspace.getActiveFile();
-      if (!file) return void new import_obsidian4.Notice("No active note selected.");
-      await chat.chatActiveNote(file);
-    }
-  });
-  ctx.addCommand({
-    id: "ai-copilot-chat-query",
-    name: "AI Copilot: Chat using vault query",
-    callback: async () => {
-      const query = window.prompt("Ask a question about your notes:");
-      if (!query?.trim()) return;
-      await chat.chatQuery(query);
-    }
-  });
-  ctx.addCommand({
-    id: "ai-copilot-rebuild-vector-index",
-    name: "AI Copilot: Rebuild persistent vector index",
-    callback: async () => {
-      const count = await indexing.rebuildPersistentIndex();
-      new import_obsidian4.Notice(`AI Copilot: rebuilt vector index for ${count} notes.`);
-    }
-  });
-  ctx.addCommand({
-    id: "ai-copilot-run-refinement-now",
-    name: "AI Copilot: Run refinement now",
-    callback: async () => void ctx.runRefinementPass()
-  });
-  ctx.addCommand({
-    id: "ai-copilot-preview-refinement-patch",
-    name: "AI Copilot: Preview structured refinement patch",
-    callback: async () => {
-      const file = ctx.app.workspace.getActiveFile();
-      if (!file) return void new import_obsidian4.Notice("No active note selected.");
-      const content = await ctx.vault.read(file.path);
-      const settings = ctx.getSettings();
-      new import_obsidian4.Notice("AI Copilot: generating refinement preview\u2026");
-      const candidates = [{ path: file.path, content }];
-      const prompt = buildRefinementPrompt(candidates, {
-        enableWebEnrichment: settings.enableWebEnrichment
-      });
-      const plan = buildRefinementPlan(candidates);
-      const llmOutput = await buildClient(settings).chat(
-        `${toMarkdownPlan(plan)}
-
-${prompt}`,
-        buildPatchPlanSystemPrompt()
-      );
-      const fileContents = /* @__PURE__ */ new Map([[file.path, content]]);
-      const preview = buildRefinementPreview(llmOutput, fileContents, candidates);
-      const md = toMarkdownRefinementPreview(preview);
-      await ctx.writeAssistantOutput("Refinement Log", md);
-      const editCount = preview.singleFilePreviews.reduce(
-        (sum, p) => sum + p.preview.summary.totalEdits,
-        0
-      );
-      new import_obsidian4.Notice(`AI Copilot: preview logged \u2014 ${editCount} edit(s) proposed.`);
-    }
-  });
-  ctx.addCommand({
-    id: "ai-copilot-smart-apply-safe",
-    name: "AI Copilot: Auto-apply safe refinement edits",
-    callback: async () => {
-      const file = ctx.app.workspace.getActiveFile();
-      if (!file) return void new import_obsidian4.Notice("No active note selected.");
-      const content = await ctx.vault.read(file.path);
-      const settings = ctx.getSettings();
-      new import_obsidian4.Notice("AI Copilot: analyzing note for safe edits\u2026");
-      const candidates = [{ path: file.path, content }];
-      const prompt = buildRefinementPrompt(candidates, {
-        enableWebEnrichment: settings.enableWebEnrichment
-      });
-      const plan = buildRefinementPlan(candidates);
-      const llmOutput = await buildClient(settings).chat(
-        `${toMarkdownPlan(plan)}
-
-${prompt}`,
-        buildPatchPlanSystemPrompt()
-      );
-      const fileContents = /* @__PURE__ */ new Map([[file.path, content]]);
-      const preview = buildRefinementPreview(llmOutput, fileContents, candidates);
-      const decision = buildSafeAutoApplyDecision(preview);
-      const totalSafe = (decision.singleFileSelections ?? []).reduce(
-        (sum, s) => sum + (s.selectedEditIndices?.length ?? 0),
-        0
-      );
-      if (totalSafe === 0) {
-        await ctx.writeAssistantOutput("Refinement Log", toMarkdownRefinementPreview(preview));
-        return void new import_obsidian4.Notice("AI Copilot: no safe edits to apply. Preview logged.");
-      }
-      const { result, snapshot } = applyRefinementDecision(preview, decision, fileContents);
-      for (const sr of result.singleFileResults) {
-        if (sr.applied.transactions.some((t) => t.applied)) {
-          await ctx.vault.modify(sr.path, sr.applied.finalContent);
-        }
-      }
-      ctx.setLastRefinementSnapshot(snapshot);
-      await ctx.writeAssistantOutput(
-        "Refinement Log",
-        `## Smart Apply (safe only)
-${result.summary}
-
-${toMarkdownRefinementPreview(preview)}`
-      );
-      new import_obsidian4.Notice(`AI Copilot: applied ${totalSafe} safe edit(s).`);
-    }
-  });
-  ctx.addCommand({
-    id: "ai-copilot-rollback-smart-refinement",
-    name: "AI Copilot: Roll back last smart refinement",
-    callback: async () => {
-      const snapshot = ctx.getLastRefinementSnapshot();
-      if (!snapshot) return void new import_obsidian4.Notice("No smart refinement snapshot available for rollback.");
-      const rollbackContents = buildRollbackContents(snapshot);
-      let restored = 0;
-      for (const [path, original] of rollbackContents) {
-        if (ctx.vault.exists(path)) {
-          await ctx.vault.modify(path, original);
-          restored++;
-        }
-      }
-      ctx.clearLastRefinementSnapshot();
-      new import_obsidian4.Notice(`AI Copilot: rolled back ${restored} file(s) to pre-refinement state.`);
-    }
-  });
-  ctx.addCommand({
-    id: "ai-copilot-rollback-last-refinement-patch",
-    name: "AI Copilot: Roll back last refinement patch",
-    callback: async () => {
-      const { transactions, path } = ctx.getLastPatchState();
-      if (!transactions.length || !path) {
-        return void new import_obsidian4.Notice("No patch transaction available for rollback.");
-      }
-      if (!ctx.vault.exists(path)) return void new import_obsidian4.Notice("Original note not found for rollback.");
-      const current = await ctx.vault.read(path);
-      const { rollbackPatchPlan: rollbackPatchPlan2 } = await Promise.resolve().then(() => (init_patch_plan(), patch_plan_exports));
-      const rolled = rollbackPatchPlan2(current, transactions);
-      await ctx.vault.modify(path, rolled);
-      ctx.clearLastPatchState();
-      new import_obsidian4.Notice("AI Copilot: rolled back last structured patch.");
-    }
-  });
-  ctx.addCommand({
-    id: "ai-copilot-indexing-status",
-    name: "AI Copilot: Show indexing queue status",
-    callback: async () => {
-      const stats = indexing.queue.stats();
-      const summary = [
-        `pending=${stats.pending}`,
-        `running=${stats.running}`,
-        `processed=${stats.processed}`,
-        `failed=${stats.failed}`,
-        stats.lastRunAt ? `lastRun=${new Date(stats.lastRunAt).toISOString()}` : "lastRun=n/a",
-        stats.lastError ? `error=${stats.lastError}` : "error=none"
-      ].join(" \xB7 ");
-      await ctx.writeAssistantOutput("Refinement Log", `## Indexing Queue Diagnostics
-${summary}`);
-      new import_obsidian4.Notice(`AI Copilot indexing: ${summary}`);
-    }
-  });
+  }
+  return fields;
 }
-async function runRefinementFlow(candidates, settings, setLastPatchState, vault, writeAssistantOutput, setLastRefinementSnapshot) {
-  if (!candidates.length) return void new import_obsidian4.Notice("AI Copilot: no recent notes to refine.");
-  const plan = buildRefinementPlan(candidates);
-  const prompt = buildRefinementPrompt(candidates, {
-    enableWebEnrichment: settings.enableWebEnrichment
-  });
-  const output = await buildClient(settings).chat(
-    `${toMarkdownPlan(plan)}
-
-${prompt}`,
-    buildPatchPlanSystemPrompt()
+function normalisePath(path) {
+  return path.replace(/\.md$/i, "").toLowerCase();
+}
+async function buildVaultGraph(vault) {
+  const files = vault.listMarkdownFiles();
+  const forwardLinks = /* @__PURE__ */ new Map();
+  const backlinks = /* @__PURE__ */ new Map();
+  const tags = /* @__PURE__ */ new Map();
+  const frontmatter = /* @__PURE__ */ new Map();
+  const rawPaths = new Set(files.map((f) => f.path));
+  const notePaths = new Set(files.map((f) => normalisePath(f.path)));
+  for (const file of files) {
+    const content = await vault.read(file.path);
+    const meta = extractMetadata(content);
+    const linkTargets = /* @__PURE__ */ new Set();
+    for (const link of meta.links) {
+      const normalised = link.replace(/\.md$/i, "").toLowerCase();
+      linkTargets.add(normalised);
+      const existing = backlinks.get(normalised) ?? /* @__PURE__ */ new Set();
+      existing.add(file.path);
+      backlinks.set(normalised, existing);
+    }
+    forwardLinks.set(file.path, linkTargets);
+    tags.set(file.path, new Set(meta.tags));
+    frontmatter.set(file.path, parseFrontmatter(content));
+  }
+  return { forwardLinks, backlinks, tags, frontmatter, notePaths, rawPaths };
+}
+function findMissingBacklinks(graph) {
+  const results = [];
+  for (const [targetNorm, sources] of graph.backlinks) {
+    if (!graph.notePaths.has(targetNorm)) continue;
+    let targetPath = null;
+    for (const p of graph.rawPaths) {
+      if (normalisePath(p) === targetNorm) {
+        targetPath = p;
+        break;
+      }
+    }
+    if (!targetPath) continue;
+    const targetForward = graph.forwardLinks.get(targetPath);
+    if (!targetForward) continue;
+    const unreciprocated = [];
+    for (const sourcePath of sources) {
+      const sourceNorm = normalisePath(sourcePath);
+      if (sourceNorm === targetNorm) continue;
+      if (!targetForward.has(sourceNorm)) {
+        unreciprocated.push(sourcePath);
+      }
+    }
+    if (unreciprocated.length > 0) {
+      results.push({ targetPath, unreciprocatedFrom: unreciprocated.sort() });
+    }
+  }
+  return results.sort((a, b) => a.targetPath.localeCompare(b.targetPath));
+}
+function detectStaleReferences(graph) {
+  const results = [];
+  for (const [sourcePath, linkTargets] of graph.forwardLinks) {
+    for (const target of linkTargets) {
+      if (graph.notePaths.has(target)) continue;
+      const possibleRename = findClosestMatch(target, graph.notePaths);
+      results.push({
+        sourcePath,
+        brokenLink: target,
+        possibleRename
+      });
+    }
+  }
+  return results.sort(
+    (a, b) => a.sourcePath.localeCompare(b.sourcePath) || a.brokenLink.localeCompare(b.brokenLink)
   );
-  const fileContents = new Map(candidates.map((c) => [c.path, c.content]));
-  const preview = buildRefinementPreview(output, fileContents, candidates);
-  if (settings.refinementAutoApply) {
-    const decision = buildSafeAutoApplyDecision(preview);
-    const totalSafe = (decision.singleFileSelections ?? []).reduce(
-      (sum, s) => sum + (s.selectedEditIndices?.length ?? 0),
-      0
-    );
-    if (totalSafe > 0) {
-      const { result, snapshot } = applyRefinementDecision(preview, decision, fileContents);
-      for (const sr of result.singleFileResults) {
-        if (sr.applied.transactions.some((t) => t.applied)) {
-          await vault.modify(sr.path, sr.applied.finalContent);
-          setLastPatchState(sr.applied.transactions, sr.path);
+}
+function analyzeTagConsistency(graph, minEvidence = 2) {
+  const results = [];
+  for (const [notePath, noteTags] of graph.tags) {
+    const noteNorm = normalisePath(notePath);
+    const connectedPaths = /* @__PURE__ */ new Set();
+    const forward = graph.forwardLinks.get(notePath);
+    if (forward) {
+      for (const linkTarget of forward) {
+        for (const raw of graph.rawPaths) {
+          if (normalisePath(raw) === linkTarget) connectedPaths.add(raw);
         }
       }
-      if (setLastRefinementSnapshot) setLastRefinementSnapshot(snapshot);
     }
-  }
-  const md = toMarkdownRefinementPreview(preview);
-  new import_obsidian4.Notice(`AI Copilot: scanned ${candidates.length} notes \xB7 TODOs ${preview.todoCount}`);
-  await writeAssistantOutput("Refinement Log", `${toMarkdownPlan(plan)}
-
-${md}
-
-## Raw LLM Output
-${output}`);
-}
-
-// src/obsidian-vault-adapter.ts
-var import_obsidian5 = require("obsidian");
-var ObsidianVaultAdapter = class {
-  constructor(app) {
-    this.app = app;
-  }
-  listMarkdownFiles() {
-    return this.app.vault.getMarkdownFiles().map((f) => ({
-      path: f.path,
-      mtime: f.stat.mtime
-    }));
-  }
-  async read(path) {
-    const file = this.app.vault.getAbstractFileByPath(path);
-    if (!(file instanceof import_obsidian5.TFile)) throw new Error(`File not found: ${path}`);
-    return this.app.vault.read(file);
-  }
-  exists(path) {
-    return this.app.vault.getAbstractFileByPath(path) !== null;
-  }
-  async create(path, content) {
-    await this.app.vault.create(path, content);
-  }
-  async modify(path, content) {
-    const file = this.app.vault.getAbstractFileByPath(path);
-    if (!(file instanceof import_obsidian5.TFile)) throw new Error(`File not found: ${path}`);
-    await this.app.vault.modify(file, content);
-  }
-  async append(path, content) {
-    const file = this.app.vault.getAbstractFileByPath(path);
-    if (!(file instanceof import_obsidian5.TFile)) throw new Error(`File not found: ${path}`);
-    await this.app.vault.append(file, content);
-  }
-  async createFolder(path) {
-    await this.app.vault.createFolder(path);
-  }
-  on(event, callback) {
-    if (event === "modify") {
-      return this.app.vault.on("modify", (f) => {
-        if (f instanceof import_obsidian5.TFile) {
-          callback({ path: f.path, mtime: f.stat.mtime });
-        }
+    const backward = graph.backlinks.get(noteNorm);
+    if (backward) {
+      for (const src of backward) connectedPaths.add(src);
+    }
+    if (connectedPaths.size === 0) continue;
+    const tagCounts = /* @__PURE__ */ new Map();
+    for (const connPath of connectedPaths) {
+      const connTags = graph.tags.get(connPath);
+      if (!connTags) continue;
+      for (const tag of connTags) {
+        if (noteTags.has(tag)) continue;
+        const evidence = tagCounts.get(tag) ?? [];
+        evidence.push(connPath);
+        tagCounts.set(tag, evidence);
+      }
+    }
+    const suggestedTags = [];
+    const evidenceNotes = /* @__PURE__ */ new Set();
+    for (const [tag, sources] of tagCounts) {
+      if (sources.length >= minEvidence) {
+        suggestedTags.push(tag);
+        for (const s of sources) evidenceNotes.add(s);
+      }
+    }
+    if (suggestedTags.length > 0) {
+      results.push({
+        notePath,
+        suggestedTags: suggestedTags.sort(),
+        evidenceNotes: [...evidenceNotes].sort()
       });
     }
-    return this.app.vault.on("delete", (f) => {
-      if ("path" in f) {
-        const mtime = f instanceof import_obsidian5.TFile ? f.stat.mtime : 0;
-        callback({ path: f.path, mtime });
-      }
-    });
   }
-};
+  return results.sort((a, b) => a.notePath.localeCompare(b.notePath));
+}
+function analyzeFrontmatterConsistency(graph, minEvidence = 2) {
+  const results = [];
+  for (const [notePath, noteFields] of graph.frontmatter) {
+    const noteNorm = normalisePath(notePath);
+    const connectedPaths = /* @__PURE__ */ new Set();
+    const forward = graph.forwardLinks.get(notePath);
+    if (forward) {
+      for (const linkTarget of forward) {
+        for (const raw of graph.rawPaths) {
+          if (normalisePath(raw) === linkTarget) connectedPaths.add(raw);
+        }
+      }
+    }
+    const backward = graph.backlinks.get(noteNorm);
+    if (backward) {
+      for (const src of backward) connectedPaths.add(src);
+    }
+    if (connectedPaths.size === 0) continue;
+    const fieldCounts = /* @__PURE__ */ new Map();
+    for (const connPath of connectedPaths) {
+      const connFields = graph.frontmatter.get(connPath);
+      if (!connFields) continue;
+      for (const [field, value] of connFields) {
+        if (noteFields.has(field)) continue;
+        const evidence = fieldCounts.get(field) ?? [];
+        evidence.push([value, connPath]);
+        fieldCounts.set(field, evidence);
+      }
+    }
+    const missingFields = [];
+    const examples = /* @__PURE__ */ new Map();
+    for (const [field, evidence] of fieldCounts) {
+      if (evidence.length >= minEvidence) {
+        missingFields.push(field);
+        examples.set(field, evidence[0]);
+      }
+    }
+    if (missingFields.length > 0) {
+      results.push({
+        notePath,
+        missingFields: missingFields.sort(),
+        examples
+      });
+    }
+  }
+  return results.sort((a, b) => a.notePath.localeCompare(b.notePath));
+}
+async function analyzeCrossNoteRelationships(vault, options = {}) {
+  const graph = await buildVaultGraph(vault);
+  return {
+    missingBacklinks: findMissingBacklinks(graph),
+    staleReferences: detectStaleReferences(graph),
+    tagSuggestions: analyzeTagConsistency(graph, options.tagMinEvidence ?? 2),
+    frontmatterSuggestions: analyzeFrontmatterConsistency(graph, options.frontmatterMinEvidence ?? 2)
+  };
+}
+function buildCrossNotePatchPlan(analysis) {
+  const fileEdits = /* @__PURE__ */ new Map();
+  for (const stale of analysis.staleReferences) {
+    const edits = fileEdits.get(stale.sourcePath) ?? [];
+    if (stale.possibleRename) {
+      edits.push({
+        find: `[[${stale.brokenLink}]]`,
+        replace: `[[${stale.possibleRename}]]`,
+        reason: `Fix broken wikilink: [[${stale.brokenLink}]] appears to have been renamed to [[${stale.possibleRename}]]`,
+        confidence: 0.5,
+        risk: "moderate"
+      });
+    } else {
+      edits.push({
+        find: `[[${stale.brokenLink}]]`,
+        replace: `[[${stale.brokenLink}]]`,
+        // keep as-is but flag it
+        reason: `Broken wikilink: [[${stale.brokenLink}]] points to a non-existent note. Consider removing or creating the target note.`,
+        confidence: 0.3,
+        risk: "moderate"
+      });
+    }
+    fileEdits.set(stale.sourcePath, edits);
+  }
+  for (const missing of analysis.missingBacklinks) {
+    const edits = fileEdits.get(missing.targetPath) ?? [];
+    const linkList = missing.unreciprocatedFrom.map((p) => `[[${p.replace(/\.md$/, "")}]]`).join(", ");
+    edits.push({
+      find: "",
+      replace: `
+
+## See also
+${missing.unreciprocatedFrom.map((p) => `- [[${p.replace(/\.md$/, "")}]]`).join("\n")}
+`,
+      reason: `Add backlinks: ${linkList} link to this note but are not linked back`,
+      confidence: 0.4,
+      risk: "moderate"
+    });
+    fileEdits.set(missing.targetPath, edits);
+  }
+  if (fileEdits.size === 0) return null;
+  const files = [];
+  for (const [path, edits] of fileEdits) {
+    const actionableEdits = edits.filter((e) => e.find !== e.replace);
+    if (actionableEdits.length > 0) {
+      files.push({ path, edits: actionableEdits });
+    }
+  }
+  if (files.length === 0) return null;
+  return {
+    title: "Cross-note enrichment suggestions",
+    files
+  };
+}
+function toMarkdownCrossNoteReport(analysis) {
+  const lines = ["# Cross-Note Analysis Report", ""];
+  lines.push("## Missing Backlinks");
+  if (analysis.missingBacklinks.length === 0) {
+    lines.push("No missing backlinks detected.", "");
+  } else {
+    for (const mb of analysis.missingBacklinks) {
+      lines.push(`### ${mb.targetPath}`);
+      lines.push("Linked from but doesn't link back to:");
+      for (const src of mb.unreciprocatedFrom) {
+        lines.push(`- [[${src.replace(/\.md$/, "")}]]`);
+      }
+      lines.push("");
+    }
+  }
+  lines.push("## Stale References");
+  if (analysis.staleReferences.length === 0) {
+    lines.push("No broken wikilinks detected.", "");
+  } else {
+    for (const sr of analysis.staleReferences) {
+      const fix = sr.possibleRename ? ` \u2192 possible rename: [[${sr.possibleRename}]]` : "";
+      lines.push(`- **${sr.sourcePath}**: [[${sr.brokenLink}]] (broken${fix})`);
+    }
+    lines.push("");
+  }
+  lines.push("## Tag Consistency Suggestions");
+  if (analysis.tagSuggestions.length === 0) {
+    lines.push("No tag suggestions.", "");
+  } else {
+    for (const ts of analysis.tagSuggestions) {
+      lines.push(`### ${ts.notePath}`);
+      lines.push(`Consider adding: ${ts.suggestedTags.map((t) => `#${t}`).join(", ")}`);
+      lines.push(`Evidence from: ${ts.evidenceNotes.map((n) => `[[${n.replace(/\.md$/, "")}]]`).join(", ")}`);
+      lines.push("");
+    }
+  }
+  lines.push("## Frontmatter Consistency Suggestions");
+  if (analysis.frontmatterSuggestions.length === 0) {
+    lines.push("No frontmatter suggestions.", "");
+  } else {
+    for (const fs of analysis.frontmatterSuggestions) {
+      lines.push(`### ${fs.notePath}`);
+      lines.push("Missing fields:");
+      for (const field of fs.missingFields) {
+        const example = fs.examples.get(field);
+        if (example) {
+          lines.push(`- \`${field}\`: e.g. \`${example[0]}\` (from [[${example[1].replace(/\.md$/, "")}]])`);
+        } else {
+          lines.push(`- \`${field}\``);
+        }
+      }
+      lines.push("");
+    }
+  }
+  return lines.join("\n");
+}
+function levenshtein(a, b) {
+  const m = a.length, n = b.length;
+  if (m === 0) return n;
+  if (n === 0) return m;
+  const dp = Array.from({ length: m + 1 }, () => Array(n + 1).fill(0));
+  for (let i = 0; i <= m; i++) dp[i][0] = i;
+  for (let j = 0; j <= n; j++) dp[0][j] = j;
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      dp[i][j] = a[i - 1] === b[j - 1] ? dp[i - 1][j - 1] : 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
+    }
+  }
+  return dp[m][n];
+}
+function findClosestMatch(target, known) {
+  const maxDist = Math.max(2, Math.floor(target.length * 0.3));
+  let best = null;
+  let bestDist = Infinity;
+  for (const candidate of known) {
+    const dist = levenshtein(target, candidate);
+    if (dist < bestDist && dist <= maxDist && dist > 0) {
+      bestDist = dist;
+      best = candidate;
+    }
+  }
+  return best;
+}
 
 // src/enrichment-state.ts
 var DEFAULT_ENRICHMENT_THRESHOLDS = {
@@ -3207,6 +3272,617 @@ async function invalidateIfContentChanged(vault, notePath, currentContent) {
   return true;
 }
 
+// src/enrichment-queue-view.ts
+var import_obsidian4 = require("obsidian");
+init_patch_plan();
+var ENRICHMENT_QUEUE_VIEW = "ai-copilot-enrichment-queue-view";
+var GROUP_LABELS = {
+  "human-required": "Needs Review",
+  "suggested": "Awaiting Approval",
+  "auto-enriched": "Auto-Enriched (Info)"
+};
+var GROUP_ORDER = ["human-required", "suggested", "auto-enriched"];
+var TRIGGER_LABELS = {
+  "low-confidence": "Low confidence",
+  "conflicting-evidence": "Conflicting evidence",
+  "ambiguous-intent": "Ambiguous intent",
+  "destructive-rewrite": "Large rewrite",
+  "safety-failure": "Safety issue",
+  "all-conflicting": "All edits conflict",
+  "cross-note": "Cross-note analysis"
+};
+var EnrichmentQueueView = class extends import_obsidian4.ItemView {
+  constructor(leaf) {
+    super(leaf);
+    this.vault = null;
+    this.records = [];
+    this.pendingCount = 0;
+  }
+  getViewType() {
+    return ENRICHMENT_QUEUE_VIEW;
+  }
+  getDisplayText() {
+    return "Enrichment Queue";
+  }
+  getIcon() {
+    return "list-checks";
+  }
+  setDeps(vault) {
+    this.vault = vault;
+  }
+  getPendingCount() {
+    return this.pendingCount;
+  }
+  async onOpen() {
+    await this.refresh();
+  }
+  async refresh() {
+    if (!this.vault) return;
+    await this.loadRecords();
+    this.render();
+  }
+  async loadRecords() {
+    if (!this.vault) return;
+    const dir = "AI Copilot/.enrichment";
+    if (!this.vault.exists(dir)) {
+      this.records = [];
+      this.pendingCount = 0;
+      return;
+    }
+    const files = this.vault.listMarkdownFiles ? this.vault.listMarkdownFiles() : [];
+    const allFiles = files.filter((f) => f.path.startsWith(dir) && f.path.endsWith(".json"));
+    const records = [];
+    const mdFiles = this.vault.listMarkdownFiles().filter(
+      (f) => !f.path.startsWith("AI Copilot/")
+    );
+    for (const file of mdFiles) {
+      try {
+        const record = await loadEnrichmentState(this.vault, file.path);
+        if (record.state === "suggested" || record.state === "human-required" || record.state === "auto-enriched") {
+          records.push(record);
+        }
+      } catch {
+      }
+    }
+    this.records = records;
+    this.pendingCount = records.filter(
+      (r) => r.state === "suggested" || r.state === "human-required"
+    ).length;
+  }
+  render() {
+    const root = this.containerEl.children[1];
+    root.empty();
+    const header = root.createDiv({ cls: "ai-copilot-eq-header" });
+    header.createEl("h3", { text: "Enrichment Queue" });
+    const refreshBtn = header.createEl("button", {
+      text: "Refresh",
+      cls: "ai-copilot-eq-refresh"
+    });
+    refreshBtn.onclick = () => void this.refresh();
+    if (this.pendingCount > 0) {
+      header.createEl("span", {
+        text: `${this.pendingCount}`,
+        cls: "ai-copilot-eq-badge"
+      });
+    }
+    if (this.records.length === 0) {
+      root.createDiv({
+        text: "No enrichment suggestions pending.",
+        cls: "ai-copilot-eq-empty"
+      });
+      return;
+    }
+    const grouped = /* @__PURE__ */ new Map();
+    for (const group of GROUP_ORDER) {
+      grouped.set(group, []);
+    }
+    for (const record of this.records) {
+      const group = record.state;
+      if (grouped.has(group)) {
+        grouped.get(group).push(record);
+      }
+    }
+    const list = root.createDiv({ cls: "ai-copilot-eq-list" });
+    for (const group of GROUP_ORDER) {
+      const items = grouped.get(group) ?? [];
+      if (items.length === 0) continue;
+      const section = list.createDiv({ cls: "ai-copilot-eq-section" });
+      section.createEl("h4", {
+        text: `${GROUP_LABELS[group]} (${items.length})`,
+        cls: "ai-copilot-eq-group-label"
+      });
+      for (const record of items) {
+        this.renderRecord(section, record, group);
+      }
+    }
+  }
+  renderRecord(container, record, group) {
+    const card = container.createDiv({ cls: "ai-copilot-eq-card" });
+    const titleRow = card.createDiv({ cls: "ai-copilot-eq-title-row" });
+    const noteLink = titleRow.createEl("a", {
+      text: record.notePath,
+      href: "#",
+      cls: "ai-copilot-eq-note-link"
+    });
+    noteLink.onclick = (e) => {
+      e.preventDefault();
+      void this.openNote(record.notePath);
+    };
+    if (record.avgConfidence !== null) {
+      const pct = Math.round(record.avgConfidence * 100);
+      const cls = pct >= 80 ? "ai-copilot-eq-conf-high" : pct >= 60 ? "ai-copilot-eq-conf-mid" : "ai-copilot-eq-conf-low";
+      titleRow.createEl("span", {
+        text: `${pct}%`,
+        cls: `ai-copilot-eq-conf ${cls}`
+      });
+    }
+    if (record.triggers.length > 0) {
+      const triggers = card.createDiv({ cls: "ai-copilot-eq-triggers" });
+      for (const trigger of record.triggers) {
+        triggers.createEl("span", {
+          text: TRIGGER_LABELS[trigger] ?? trigger,
+          cls: "ai-copilot-eq-trigger-tag"
+        });
+      }
+    }
+    if (record.pendingPlan) {
+      this.renderDiffPreview(card, record);
+    }
+    if (group === "suggested" || group === "human-required") {
+      const actions = card.createDiv({ cls: "ai-copilot-eq-actions" });
+      const acceptBtn = actions.createEl("button", {
+        text: "Accept",
+        cls: "ai-copilot-eq-accept"
+      });
+      acceptBtn.onclick = () => void this.acceptRecord(record);
+      const rejectBtn = actions.createEl("button", {
+        text: "Reject",
+        cls: "ai-copilot-eq-reject"
+      });
+      rejectBtn.onclick = () => void this.rejectRecord(record);
+    }
+    card.createDiv({
+      text: new Date(record.updatedAt).toLocaleString(),
+      cls: "ai-copilot-eq-timestamp"
+    });
+  }
+  renderDiffPreview(container, record) {
+    const plan = record.pendingPlan;
+    if (!plan || !("edits" in plan)) return;
+    const edits = plan.edits;
+    if (edits.length === 0) return;
+    const preview = container.createDiv({ cls: "ai-copilot-eq-diff" });
+    const editCount = edits.length;
+    preview.createEl("div", {
+      text: `${editCount} edit${editCount !== 1 ? "s" : ""} proposed`,
+      cls: "ai-copilot-eq-diff-header"
+    });
+    const maxShow = 3;
+    for (let i = 0; i < Math.min(edits.length, maxShow); i++) {
+      const edit = edits[i];
+      const editEl = preview.createDiv({ cls: "ai-copilot-eq-edit" });
+      editEl.createEl("div", {
+        text: edit.reason,
+        cls: "ai-copilot-eq-edit-reason"
+      });
+      const diffBlock = editEl.createDiv({ cls: "ai-copilot-eq-diff-block" });
+      diffBlock.createEl("div", {
+        text: `- ${edit.find.slice(0, 120)}${edit.find.length > 120 ? "\u2026" : ""}`,
+        cls: "ai-copilot-eq-diff-del"
+      });
+      diffBlock.createEl("div", {
+        text: `+ ${edit.replace.slice(0, 120)}${edit.replace.length > 120 ? "\u2026" : ""}`,
+        cls: "ai-copilot-eq-diff-add"
+      });
+    }
+    if (edits.length > maxShow) {
+      preview.createEl("div", {
+        text: `\u2026and ${edits.length - maxShow} more`,
+        cls: "ai-copilot-eq-diff-more"
+      });
+    }
+  }
+  async openNote(path) {
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (file && file instanceof import_obsidian4.TFile) {
+      await this.app.workspace.getLeaf(true).openFile(file);
+      return;
+    }
+    new import_obsidian4.Notice(`AI Copilot: note not found (${path})`);
+  }
+  async acceptRecord(record) {
+    if (!this.vault) return;
+    try {
+      if (record.state === "human-required") {
+        await transitionEnrichmentState(this.vault, record.notePath, "suggested", {});
+      }
+      await transitionEnrichmentState(this.vault, record.notePath, "approved", {
+        editDecisions: Object.fromEntries(
+          record.pendingPlan?.edits?.map((_, i) => [i, "approved"]) ?? []
+        )
+      });
+      const plan = record.pendingPlan;
+      if (plan && this.vault.exists(record.notePath)) {
+        const content = await this.vault.read(record.notePath);
+        const result = applyPatchPlan(content, plan);
+        if (result.transactions.some((t) => t.applied)) {
+          await this.vault.modify(record.notePath, result.finalContent);
+        }
+        await transitionEnrichmentState(this.vault, record.notePath, "applied", {
+          preApplySnapshot: result.snapshot
+        });
+        await transitionEnrichmentState(this.vault, record.notePath, "unenriched", {
+          pendingPlan: null,
+          editDecisions: null,
+          preApplySnapshot: null,
+          triggers: []
+        });
+        const appliedCount = result.transactions.filter((t) => t.applied).length;
+        new import_obsidian4.Notice(`AI Copilot: applied ${appliedCount} edit(s) to ${record.notePath}`);
+      }
+      await this.refresh();
+    } catch (err) {
+      new import_obsidian4.Notice(`AI Copilot: failed to accept enrichment \u2014 ${err}`);
+    }
+  }
+  async rejectRecord(record) {
+    if (!this.vault) return;
+    try {
+      const reason = window.prompt("Rejection reason (optional):");
+      await transitionEnrichmentState(this.vault, record.notePath, "rejected", {
+        editDecisions: Object.fromEntries(
+          record.pendingPlan?.edits?.map((_, i) => [i, "rejected"]) ?? []
+        )
+      });
+      await transitionEnrichmentState(this.vault, record.notePath, "unenriched", {
+        pendingPlan: null,
+        editDecisions: null,
+        preApplySnapshot: null,
+        triggers: []
+      });
+      new import_obsidian4.Notice(`AI Copilot: rejected enrichment for ${record.notePath}`);
+      await this.refresh();
+    } catch (err) {
+      new import_obsidian4.Notice(`AI Copilot: failed to reject enrichment \u2014 ${err}`);
+    }
+  }
+};
+
+// src/command-registration.ts
+function registerPluginCommands(ctx, chat, indexing) {
+  ctx.addCommand({
+    id: "ai-copilot-open-chat-panel",
+    name: "AI Copilot: Open chat panel",
+    callback: async () => {
+      await chat.activateChatView();
+    }
+  });
+  ctx.addCommand({
+    id: "ai-copilot-chat-active-note",
+    name: "AI Copilot: Chat about active note",
+    callback: async () => {
+      const file = ctx.app.workspace.getActiveFile();
+      if (!file) return void new import_obsidian5.Notice("No active note selected.");
+      await chat.chatActiveNote(file);
+    }
+  });
+  ctx.addCommand({
+    id: "ai-copilot-chat-query",
+    name: "AI Copilot: Chat using vault query",
+    callback: async () => {
+      const query = window.prompt("Ask a question about your notes:");
+      if (!query?.trim()) return;
+      await chat.chatQuery(query);
+    }
+  });
+  ctx.addCommand({
+    id: "ai-copilot-rebuild-vector-index",
+    name: "AI Copilot: Rebuild persistent vector index",
+    callback: async () => {
+      const count = await indexing.rebuildPersistentIndex();
+      new import_obsidian5.Notice(`AI Copilot: rebuilt vector index for ${count} notes.`);
+    }
+  });
+  ctx.addCommand({
+    id: "ai-copilot-run-refinement-now",
+    name: "AI Copilot: Run refinement now",
+    callback: async () => void ctx.runRefinementPass()
+  });
+  ctx.addCommand({
+    id: "ai-copilot-preview-refinement-patch",
+    name: "AI Copilot: Preview structured refinement patch",
+    callback: async () => {
+      const file = ctx.app.workspace.getActiveFile();
+      if (!file) return void new import_obsidian5.Notice("No active note selected.");
+      const content = await ctx.vault.read(file.path);
+      const settings = ctx.getSettings();
+      new import_obsidian5.Notice("AI Copilot: generating refinement preview\u2026");
+      const candidates = [{ path: file.path, content }];
+      const prompt = buildRefinementPrompt(candidates, {
+        enableWebEnrichment: settings.enableWebEnrichment
+      });
+      const plan = buildRefinementPlan(candidates);
+      const llmOutput = await buildClient(settings).chat(
+        `${toMarkdownPlan(plan)}
+
+${prompt}`,
+        buildPatchPlanSystemPrompt()
+      );
+      const fileContents = /* @__PURE__ */ new Map([[file.path, content]]);
+      const preview = buildRefinementPreview(llmOutput, fileContents, candidates);
+      const md = toMarkdownRefinementPreview(preview);
+      await ctx.writeAssistantOutput("Refinement Log", md);
+      const editCount = preview.singleFilePreviews.reduce(
+        (sum, p) => sum + p.preview.summary.totalEdits,
+        0
+      );
+      new import_obsidian5.Notice(`AI Copilot: preview logged \u2014 ${editCount} edit(s) proposed.`);
+    }
+  });
+  ctx.addCommand({
+    id: "ai-copilot-smart-apply-safe",
+    name: "AI Copilot: Auto-apply safe refinement edits",
+    callback: async () => {
+      const file = ctx.app.workspace.getActiveFile();
+      if (!file) return void new import_obsidian5.Notice("No active note selected.");
+      const content = await ctx.vault.read(file.path);
+      const settings = ctx.getSettings();
+      new import_obsidian5.Notice("AI Copilot: analyzing note for safe edits\u2026");
+      const candidates = [{ path: file.path, content }];
+      const prompt = buildRefinementPrompt(candidates, {
+        enableWebEnrichment: settings.enableWebEnrichment
+      });
+      const plan = buildRefinementPlan(candidates);
+      const llmOutput = await buildClient(settings).chat(
+        `${toMarkdownPlan(plan)}
+
+${prompt}`,
+        buildPatchPlanSystemPrompt()
+      );
+      const fileContents = /* @__PURE__ */ new Map([[file.path, content]]);
+      const preview = buildRefinementPreview(llmOutput, fileContents, candidates);
+      const decision = buildSafeAutoApplyDecision(preview);
+      const totalSafe = (decision.singleFileSelections ?? []).reduce(
+        (sum, s) => sum + (s.selectedEditIndices?.length ?? 0),
+        0
+      );
+      if (totalSafe === 0) {
+        await ctx.writeAssistantOutput("Refinement Log", toMarkdownRefinementPreview(preview));
+        return void new import_obsidian5.Notice("AI Copilot: no safe edits to apply. Preview logged.");
+      }
+      const { result, snapshot } = applyRefinementDecision(preview, decision, fileContents);
+      for (const sr of result.singleFileResults) {
+        if (sr.applied.transactions.some((t) => t.applied)) {
+          await ctx.vault.modify(sr.path, sr.applied.finalContent);
+        }
+      }
+      ctx.setLastRefinementSnapshot(snapshot);
+      await ctx.writeAssistantOutput(
+        "Refinement Log",
+        `## Smart Apply (safe only)
+${result.summary}
+
+${toMarkdownRefinementPreview(preview)}`
+      );
+      new import_obsidian5.Notice(`AI Copilot: applied ${totalSafe} safe edit(s).`);
+    }
+  });
+  ctx.addCommand({
+    id: "ai-copilot-rollback-smart-refinement",
+    name: "AI Copilot: Roll back last smart refinement",
+    callback: async () => {
+      const snapshot = ctx.getLastRefinementSnapshot();
+      if (!snapshot) return void new import_obsidian5.Notice("No smart refinement snapshot available for rollback.");
+      const rollbackContents = buildRollbackContents(snapshot);
+      let restored = 0;
+      for (const [path, original] of rollbackContents) {
+        if (ctx.vault.exists(path)) {
+          await ctx.vault.modify(path, original);
+          restored++;
+        }
+      }
+      ctx.clearLastRefinementSnapshot();
+      new import_obsidian5.Notice(`AI Copilot: rolled back ${restored} file(s) to pre-refinement state.`);
+    }
+  });
+  ctx.addCommand({
+    id: "ai-copilot-rollback-last-refinement-patch",
+    name: "AI Copilot: Roll back last refinement patch",
+    callback: async () => {
+      const { transactions, path } = ctx.getLastPatchState();
+      if (!transactions.length || !path) {
+        return void new import_obsidian5.Notice("No patch transaction available for rollback.");
+      }
+      if (!ctx.vault.exists(path)) return void new import_obsidian5.Notice("Original note not found for rollback.");
+      const current = await ctx.vault.read(path);
+      const { rollbackPatchPlan: rollbackPatchPlan2 } = await Promise.resolve().then(() => (init_patch_plan(), patch_plan_exports));
+      const rolled = rollbackPatchPlan2(current, transactions);
+      await ctx.vault.modify(path, rolled);
+      ctx.clearLastPatchState();
+      new import_obsidian5.Notice("AI Copilot: rolled back last structured patch.");
+    }
+  });
+  ctx.addCommand({
+    id: "ai-copilot-cross-note-analysis",
+    name: "AI Copilot: Run cross-note analysis",
+    callback: async () => {
+      new import_obsidian5.Notice("AI Copilot: analyzing cross-note relationships\u2026");
+      const settings = ctx.getSettings();
+      const analysis = await analyzeCrossNoteRelationships(ctx.vault);
+      const report = toMarkdownCrossNoteReport(analysis);
+      await ctx.writeAssistantOutput("Refinement Log", report);
+      if (settings.enrichmentPersistState) {
+        const patchPlan = buildCrossNotePatchPlan(analysis);
+        if (patchPlan) {
+          const runId = `cross-note-${Date.now()}`;
+          for (const file of patchPlan.files) {
+            try {
+              const content = await ctx.vault.read(file.path);
+              const contentHash2 = await computeContentHash(content);
+              await transitionEnrichmentState(ctx.vault, file.path, "analyzing", {
+                runId,
+                contentHash: contentHash2
+              });
+              await transitionEnrichmentState(ctx.vault, file.path, "human-required", {
+                pendingPlan: { path: file.path, edits: file.edits },
+                triggers: ["cross-note"],
+                avgConfidence: file.edits.reduce((s, e) => s + (e.confidence ?? 0.5), 0) / file.edits.length,
+                contextNotes: patchPlan.files.filter((f) => f.path !== file.path).map((f) => f.path),
+                model: "cross-note-analysis"
+              });
+            } catch {
+            }
+          }
+        }
+      }
+      const totalFindings = analysis.missingBacklinks.length + analysis.staleReferences.length + analysis.tagSuggestions.length + analysis.frontmatterSuggestions.length;
+      new import_obsidian5.Notice(
+        `AI Copilot: cross-note analysis complete \u2014 ${totalFindings} finding(s). See Refinement Log.`
+      );
+    }
+  });
+  ctx.addCommand({
+    id: "ai-copilot-indexing-status",
+    name: "AI Copilot: Show indexing queue status",
+    callback: async () => {
+      const stats = indexing.queue.stats();
+      const summary = [
+        `pending=${stats.pending}`,
+        `running=${stats.running}`,
+        `processed=${stats.processed}`,
+        `failed=${stats.failed}`,
+        stats.lastRunAt ? `lastRun=${new Date(stats.lastRunAt).toISOString()}` : "lastRun=n/a",
+        stats.lastError ? `error=${stats.lastError}` : "error=none"
+      ].join(" \xB7 ");
+      await ctx.writeAssistantOutput("Refinement Log", `## Indexing Queue Diagnostics
+${summary}`);
+      new import_obsidian5.Notice(`AI Copilot indexing: ${summary}`);
+    }
+  });
+  ctx.addCommand({
+    id: "ai-copilot-open-enrichment-queue",
+    name: "AI Copilot: Open enrichment review queue",
+    callback: async () => {
+      const { workspace } = ctx.app;
+      let leaf = workspace.getLeavesOfType(ENRICHMENT_QUEUE_VIEW)[0] ?? null;
+      if (!leaf) {
+        leaf = workspace.getRightLeaf(false);
+        if (!leaf) return;
+        await leaf.setViewState({ type: ENRICHMENT_QUEUE_VIEW, active: true });
+      }
+      workspace.revealLeaf(leaf);
+      const view = leaf.view;
+      if (view instanceof EnrichmentQueueView) {
+        await view.refresh();
+      }
+    }
+  });
+}
+async function runRefinementFlow(candidates, settings, setLastPatchState, vault, writeAssistantOutput, setLastRefinementSnapshot) {
+  if (!candidates.length) return void new import_obsidian5.Notice("AI Copilot: no recent notes to refine.");
+  const plan = buildRefinementPlan(candidates);
+  const prompt = buildRefinementPrompt(candidates, {
+    enableWebEnrichment: settings.enableWebEnrichment
+  });
+  const output = await buildClient(settings).chat(
+    `${toMarkdownPlan(plan)}
+
+${prompt}`,
+    buildPatchPlanSystemPrompt()
+  );
+  const fileContents = new Map(candidates.map((c) => [c.path, c.content]));
+  const preview = buildRefinementPreview(output, fileContents, candidates);
+  if (settings.refinementAutoApply) {
+    const decision = buildSafeAutoApplyDecision(preview);
+    const totalSafe = (decision.singleFileSelections ?? []).reduce(
+      (sum, s) => sum + (s.selectedEditIndices?.length ?? 0),
+      0
+    );
+    if (totalSafe > 0) {
+      const { result, snapshot } = applyRefinementDecision(preview, decision, fileContents);
+      for (const sr of result.singleFileResults) {
+        if (sr.applied.transactions.some((t) => t.applied)) {
+          await vault.modify(sr.path, sr.applied.finalContent);
+          setLastPatchState(sr.applied.transactions, sr.path);
+        }
+      }
+      if (setLastRefinementSnapshot) setLastRefinementSnapshot(snapshot);
+    }
+  }
+  let crossNoteReport = "";
+  try {
+    const analysis = await analyzeCrossNoteRelationships(vault);
+    const totalFindings = analysis.missingBacklinks.length + analysis.staleReferences.length + analysis.tagSuggestions.length + analysis.frontmatterSuggestions.length;
+    if (totalFindings > 0) {
+      crossNoteReport = `
+
+${toMarkdownCrossNoteReport(analysis)}`;
+    }
+  } catch {
+  }
+  const md = toMarkdownRefinementPreview(preview);
+  new import_obsidian5.Notice(`AI Copilot: scanned ${candidates.length} notes \xB7 TODOs ${preview.todoCount}`);
+  await writeAssistantOutput("Refinement Log", `${toMarkdownPlan(plan)}
+
+${md}${crossNoteReport}
+
+## Raw LLM Output
+${output}`);
+}
+
+// src/obsidian-vault-adapter.ts
+var import_obsidian6 = require("obsidian");
+var ObsidianVaultAdapter = class {
+  constructor(app) {
+    this.app = app;
+  }
+  listMarkdownFiles() {
+    return this.app.vault.getMarkdownFiles().map((f) => ({
+      path: f.path,
+      mtime: f.stat.mtime
+    }));
+  }
+  async read(path) {
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (!(file instanceof import_obsidian6.TFile)) throw new Error(`File not found: ${path}`);
+    return this.app.vault.read(file);
+  }
+  exists(path) {
+    return this.app.vault.getAbstractFileByPath(path) !== null;
+  }
+  async create(path, content) {
+    await this.app.vault.create(path, content);
+  }
+  async modify(path, content) {
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (!(file instanceof import_obsidian6.TFile)) throw new Error(`File not found: ${path}`);
+    await this.app.vault.modify(file, content);
+  }
+  async append(path, content) {
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (!(file instanceof import_obsidian6.TFile)) throw new Error(`File not found: ${path}`);
+    await this.app.vault.append(file, content);
+  }
+  async createFolder(path) {
+    await this.app.vault.createFolder(path);
+  }
+  on(event, callback) {
+    if (event === "modify") {
+      return this.app.vault.on("modify", (f) => {
+        if (f instanceof import_obsidian6.TFile) {
+          callback({ path: f.path, mtime: f.stat.mtime });
+        }
+      });
+    }
+    return this.app.vault.on("delete", (f) => {
+      if ("path" in f) {
+        const mtime = f instanceof import_obsidian6.TFile ? f.stat.mtime : 0;
+        callback({ path: f.path, mtime });
+      }
+    });
+  }
+};
+
 // src/enrichment-orchestrator.ts
 var EnrichmentOrchestrator = class {
   constructor(deps) {
@@ -3360,7 +4036,7 @@ ${toMarkdownRefinementPreview(preview)}`
 };
 
 // src/main.ts
-var AICopilotPlugin = class extends import_obsidian6.Plugin {
+var AICopilotPlugin = class extends import_obsidian7.Plugin {
   constructor() {
     super(...arguments);
     this.settings = DEFAULT_SETTINGS;
@@ -3394,10 +4070,15 @@ var AICopilotPlugin = class extends import_obsidian6.Plugin {
     this.addSettingTab(new AICopilotSettingTab(this.app, this));
     if (this.settings.strictConfigValidation) {
       const issues = validateSettings(this.settings);
-      if (issues.length) new import_obsidian6.Notice(`AI Copilot settings warnings: ${issues.join(" | ")}`);
+      if (issues.length) new import_obsidian7.Notice(`AI Copilot settings warnings: ${issues.join(" | ")}`);
     }
     this.indexing.initializeVectorIndex();
     this.chat.registerView((type, cb) => this.registerView(type, cb));
+    this.registerView(ENRICHMENT_QUEUE_VIEW, (leaf) => {
+      const view = new EnrichmentQueueView(leaf);
+      view.setDeps(this.vault_);
+      return view;
+    });
     registerPluginCommands(
       {
         addCommand: (cmd) => this.addCommand(cmd),
@@ -3429,7 +4110,7 @@ var AICopilotPlugin = class extends import_obsidian6.Plugin {
     this.startRefinementLoop();
     this.indexing.registerVaultSyncEvents((evt) => this.registerEvent(evt));
     this.enrichment.registerVaultEvents((evt) => this.registerEvent(evt));
-    new import_obsidian6.Notice("AI Copilot loaded.");
+    new import_obsidian7.Notice("AI Copilot loaded.");
   }
   onunload() {
     if (this.intervalId) window.clearInterval(this.intervalId);

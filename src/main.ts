@@ -12,6 +12,7 @@ import type { VaultAdapter } from "./vault-adapter";
 import type { PatchTransaction } from "./patcher";
 import type { SmartRefinementSnapshot } from "./smart-refinement";
 import { EnrichmentOrchestrator } from "./enrichment-orchestrator";
+import { EnrichmentQueueView, ENRICHMENT_QUEUE_VIEW } from "./enrichment-queue-view";
 
 export default class AICopilotPlugin extends Plugin {
   settings: AICopilotSettings = DEFAULT_SETTINGS;
@@ -51,6 +52,11 @@ export default class AICopilotPlugin extends Plugin {
 
     this.indexing.initializeVectorIndex();
     this.chat.registerView((type, cb) => this.registerView(type, cb));
+    this.registerView(ENRICHMENT_QUEUE_VIEW, (leaf) => {
+      const view = new EnrichmentQueueView(leaf);
+      view.setDeps(this.vault_);
+      return view;
+    });
 
     registerPluginCommands(
       {

@@ -25,6 +25,7 @@ import {
   transitionEnrichmentState,
   computeContentHash,
 } from "./enrichment-state";
+import { EnrichmentQueueView, ENRICHMENT_QUEUE_VIEW } from "./enrichment-queue-view";
 
 export interface CommandContext {
   addCommand: (command: Command) => void;
@@ -277,6 +278,25 @@ export function registerPluginCommands(
       ].join(" · ");
       await ctx.writeAssistantOutput("Refinement Log", `## Indexing Queue Diagnostics\n${summary}`);
       new Notice(`AI Copilot indexing: ${summary}`);
+    }
+  });
+
+  ctx.addCommand({
+    id: "ai-copilot-open-enrichment-queue",
+    name: "AI Copilot: Open enrichment review queue",
+    callback: async () => {
+      const { workspace } = ctx.app;
+      let leaf: import("obsidian").WorkspaceLeaf | null = workspace.getLeavesOfType(ENRICHMENT_QUEUE_VIEW)[0] ?? null;
+      if (!leaf) {
+        leaf = workspace.getRightLeaf(false);
+        if (!leaf) return;
+        await leaf.setViewState({ type: ENRICHMENT_QUEUE_VIEW, active: true });
+      }
+      workspace.revealLeaf(leaf);
+      const view = leaf.view;
+      if (view instanceof EnrichmentQueueView) {
+        await view.refresh();
+      }
     }
   });
 }

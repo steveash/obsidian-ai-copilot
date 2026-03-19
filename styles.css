@@ -30,3 +30,190 @@
   opacity: 0.75;
   margin-bottom: 2px;
 }
+
+/* ── Enrichment Queue ────────────────────────────────────────────── */
+
+.ai-copilot-eq-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.ai-copilot-eq-header h3 {
+  margin: 0;
+  flex: 1;
+}
+
+.ai-copilot-eq-refresh {
+  font-size: 12px;
+  padding: 2px 8px;
+}
+
+.ai-copilot-eq-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 10px;
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.ai-copilot-eq-empty {
+  padding: 16px 8px;
+  opacity: 0.6;
+  font-style: italic;
+}
+
+.ai-copilot-eq-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-height: 75vh;
+  overflow-y: auto;
+}
+
+.ai-copilot-eq-group-label {
+  margin: 0 0 6px 0;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  opacity: 0.7;
+}
+
+.ai-copilot-eq-card {
+  padding: 10px;
+  border-radius: 6px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-primary-alt);
+  margin-bottom: 6px;
+}
+
+.ai-copilot-eq-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.ai-copilot-eq-note-link {
+  font-weight: 500;
+  text-decoration: none;
+}
+
+.ai-copilot-eq-conf {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-weight: 600;
+}
+
+.ai-copilot-eq-conf-high {
+  background: var(--background-modifier-success);
+  color: var(--text-success);
+}
+
+.ai-copilot-eq-conf-mid {
+  background: var(--background-modifier-border);
+}
+
+.ai-copilot-eq-conf-low {
+  background: var(--background-modifier-error);
+  color: var(--text-error);
+}
+
+.ai-copilot-eq-triggers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.ai-copilot-eq-trigger-tag {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--background-modifier-error);
+  color: var(--text-error);
+  opacity: 0.9;
+}
+
+.ai-copilot-eq-diff {
+  margin: 6px 0;
+  font-size: 12px;
+}
+
+.ai-copilot-eq-diff-header {
+  font-weight: 500;
+  margin-bottom: 4px;
+  opacity: 0.8;
+}
+
+.ai-copilot-eq-edit {
+  margin-bottom: 6px;
+}
+
+.ai-copilot-eq-edit-reason {
+  font-style: italic;
+  opacity: 0.7;
+  margin-bottom: 2px;
+}
+
+.ai-copilot-eq-diff-block {
+  font-family: var(--font-monospace);
+  font-size: 11px;
+  padding: 4px 6px;
+  border-radius: 4px;
+  background: var(--background-secondary);
+  overflow-x: auto;
+}
+
+.ai-copilot-eq-diff-del {
+  color: var(--text-error);
+}
+
+.ai-copilot-eq-diff-add {
+  color: var(--text-success);
+}
+
+.ai-copilot-eq-diff-more {
+  opacity: 0.6;
+  font-style: italic;
+  margin-top: 2px;
+}
+
+.ai-copilot-eq-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.ai-copilot-eq-accept {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  border: none;
+  padding: 4px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.ai-copilot-eq-reject {
+  background: transparent;
+  border: 1px solid var(--background-modifier-border);
+  padding: 4px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.ai-copilot-eq-timestamp {
+  font-size: 10px;
+  opacity: 0.5;
+  margin-top: 6px;
+}
