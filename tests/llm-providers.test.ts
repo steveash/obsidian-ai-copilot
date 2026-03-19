@@ -45,7 +45,9 @@ const BASE: AICopilotSettings = {
   strictConfigValidation: true,
   enrichmentConfidenceThreshold: 0.6,
   enrichmentDestructiveRewriteThreshold: 0.3,
-  enrichmentPersistState: true
+  enrichmentPersistState: true,
+  enrichmentEnabled: false,
+  enrichmentDebounceSec: 5
 };
 
 describe("buildClient factory", () => {

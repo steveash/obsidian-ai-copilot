@@ -39,6 +39,8 @@ export interface AICopilotSettings {
   enrichmentConfidenceThreshold: number;
   enrichmentDestructiveRewriteThreshold: number;
   enrichmentPersistState: boolean;
+  enrichmentEnabled: boolean;
+  enrichmentDebounceSec: number;
 }
 
 export const DEFAULT_SETTINGS: AICopilotSettings = {
@@ -77,7 +79,9 @@ export const DEFAULT_SETTINGS: AICopilotSettings = {
   strictConfigValidation: true,
   enrichmentConfidenceThreshold: 0.6,
   enrichmentDestructiveRewriteThreshold: 0.3,
-  enrichmentPersistState: true
+  enrichmentPersistState: true,
+  enrichmentEnabled: false,
+  enrichmentDebounceSec: 5
 };
 
 function parseProvider(value: string): AICopilotSettings["provider"] {
@@ -522,6 +526,30 @@ export class AICopilotSettingTab extends PluginSettingTab {
       );
 
     containerEl.createEl("h3", { text: "Enrichment State" });
+
+    new Setting(containerEl)
+      .setName("Enable on-save enrichment")
+      .setDesc("Trigger async enrichment when a note is saved")
+      .addToggle((tg) =>
+        tg.setValue(this.plugin.settings.enrichmentEnabled).onChange(async (value) => {
+          this.plugin.settings.enrichmentEnabled = value;
+          await this.plugin.saveSettings();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Enrichment debounce (seconds)")
+      .setDesc("Cooldown per note before triggering enrichment after save")
+      .addSlider((s) =>
+        s
+          .setLimits(1, 30, 1)
+          .setValue(this.plugin.settings.enrichmentDebounceSec)
+          .setDynamicTooltip()
+          .onChange(async (value) => {
+            this.plugin.settings.enrichmentDebounceSec = value;
+            await this.plugin.saveSettings();
+          })
+      );
 
     new Setting(containerEl)
       .setName("Persist enrichment state")

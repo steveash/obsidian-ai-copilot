@@ -11,6 +11,7 @@ import { ObsidianVaultAdapter } from "./obsidian-vault-adapter";
 import type { VaultAdapter } from "./vault-adapter";
 import type { PatchTransaction } from "./patcher";
 import type { SmartRefinementSnapshot } from "./smart-refinement";
+import { EnrichmentOrchestrator } from "./enrichment-orchestrator";
 
 export default class AICopilotPlugin extends Plugin {
   settings: AICopilotSettings = DEFAULT_SETTINGS;
@@ -33,6 +34,12 @@ export default class AICopilotPlugin extends Plugin {
     (query, max) => this.retrieval.getRelevantNotes(query, max),
     (name, body) => this.writeAssistantOutput(name, body)
   );
+  private enrichment = new EnrichmentOrchestrator({
+    vault: this.vault_,
+    getSettings: () => this.settings,
+    indexing: this.indexing,
+    writeAssistantOutput: (name, body) => this.writeAssistantOutput(name, body),
+  });
 
   async onload() {
     await this.loadSettings();
@@ -72,12 +79,14 @@ export default class AICopilotPlugin extends Plugin {
 
     this.startRefinementLoop();
     this.indexing.registerVaultSyncEvents((evt) => this.registerEvent(evt as any));
+    this.enrichment.registerVaultEvents((evt) => this.registerEvent(evt as any));
 
     new Notice("AI Copilot loaded.");
   }
 
   onunload() {
     if (this.intervalId) window.clearInterval(this.intervalId);
+    this.enrichment.dispose();
   }
 
   async loadSettings() {

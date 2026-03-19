@@ -492,7 +492,9 @@ var DEFAULT_SETTINGS = {
   strictConfigValidation: true,
   enrichmentConfidenceThreshold: 0.6,
   enrichmentDestructiveRewriteThreshold: 0.3,
-  enrichmentPersistState: true
+  enrichmentPersistState: true,
+  enrichmentEnabled: false,
+  enrichmentDebounceSec: 5
 };
 function parseProvider(value) {
   if (value === "openai" || value === "anthropic" || value === "bedrock") return value;
@@ -721,6 +723,18 @@ var AICopilotSettingTab = class extends import_obsidian.PluginSettingTab {
       })
     );
     containerEl.createEl("h3", { text: "Enrichment State" });
+    new import_obsidian.Setting(containerEl).setName("Enable on-save enrichment").setDesc("Trigger async enrichment when a note is saved").addToggle(
+      (tg) => tg.setValue(this.plugin.settings.enrichmentEnabled).onChange(async (value) => {
+        this.plugin.settings.enrichmentEnabled = value;
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian.Setting(containerEl).setName("Enrichment debounce (seconds)").setDesc("Cooldown per note before triggering enrichment after save").addSlider(
+      (s) => s.setLimits(1, 30, 1).setValue(this.plugin.settings.enrichmentDebounceSec).setDynamicTooltip().onChange(async (value) => {
+        this.plugin.settings.enrichmentDebounceSec = value;
+        await this.plugin.saveSettings();
+      })
+    );
     new import_obsidian.Setting(containerEl).setName("Persist enrichment state").setDesc("Track per-note enrichment state in sidecar files").addToggle(
       (tg) => tg.setValue(this.plugin.settings.enrichmentPersistState).onChange(async (value) => {
         this.plugin.settings.enrichmentPersistState = value;
@@ -3040,6 +3054,311 @@ var ObsidianVaultAdapter = class {
   }
 };
 
+// src/enrichment-state.ts
+var DEFAULT_ENRICHMENT_THRESHOLDS = {
+  confidenceThreshold: 0.6,
+  destructiveRewriteThreshold: 0.3
+};
+var ALLOWED_TRANSITIONS = {
+  "unenriched": ["analyzing"],
+  "analyzing": ["auto-enriched", "suggested", "human-required", "unenriched"],
+  "auto-enriched": ["unenriched"],
+  "suggested": ["approved", "rejected", "human-required", "unenriched"],
+  "human-required": ["suggested", "rejected", "unenriched"],
+  "approved": ["applied", "unenriched"],
+  "applied": ["unenriched"],
+  "rejected": ["unenriched"]
+};
+function isValidTransition(from, to) {
+  return ALLOWED_TRANSITIONS[from]?.includes(to) ?? false;
+}
+async function computeContentHash(content) {
+  const encoded = new TextEncoder().encode(content);
+  const buffer = await crypto.subtle.digest("SHA-256", encoded);
+  return Array.from(new Uint8Array(buffer)).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+async function enrichmentStatePath(notePath) {
+  const hash = (await computeContentHash(notePath)).slice(0, 8);
+  const filename = notePath.split("/").pop()?.replace(/\.md$/, "").slice(0, 30) ?? "note";
+  const slug = filename.replace(/[^a-zA-Z0-9_-]/g, "-").replace(/-+/g, "-").toLowerCase();
+  return `AI Copilot/.enrichment/${hash}-${slug}.json`;
+}
+function defaultRecord(notePath) {
+  return {
+    version: 1,
+    notePath,
+    contentHash: "",
+    state: "unenriched",
+    updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    runId: "",
+    triggers: [],
+    pendingPlan: null,
+    editDecisions: null,
+    preApplySnapshot: null,
+    model: "",
+    avgConfidence: null,
+    contextNotes: []
+  };
+}
+async function loadEnrichmentState(vault, notePath) {
+  const path = await enrichmentStatePath(notePath);
+  if (!vault.exists(path)) {
+    return defaultRecord(notePath);
+  }
+  try {
+    const raw = await vault.read(path);
+    return JSON.parse(raw);
+  } catch {
+    return defaultRecord(notePath);
+  }
+}
+async function transitionEnrichmentState(vault, notePath, newState, updates) {
+  const existing = await loadEnrichmentState(vault, notePath);
+  if (!isValidTransition(existing.state, newState)) {
+    throw new Error(
+      `Invalid enrichment transition: ${existing.state} \u2192 ${newState} for ${notePath}`
+    );
+  }
+  const updated = {
+    ...existing,
+    ...updates,
+    state: newState,
+    updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+  };
+  const statePath = await enrichmentStatePath(notePath);
+  const dir = "AI Copilot/.enrichment";
+  if (!vault.exists(dir)) {
+    await vault.createFolder(dir);
+  }
+  if (vault.exists(statePath)) {
+    await vault.modify(statePath, JSON.stringify(updated, null, 2));
+  } else {
+    await vault.create(statePath, JSON.stringify(updated, null, 2));
+  }
+  return updated;
+}
+function evaluateInterventionTriggers(input, thresholds = DEFAULT_ENRICHMENT_THRESHOLDS) {
+  const triggers = [];
+  const { edits, originalContent, preview, conflicts, parseFlags } = input;
+  if (edits.length === 0) return triggers;
+  const avgConfidence = edits.reduce((sum, e) => sum + (e.confidence ?? 1), 0) / edits.length;
+  if (avgConfidence < thresholds.confidenceThreshold) {
+    triggers.push("low-confidence");
+  }
+  if (parseFlags?.includes("conflicting-evidence")) {
+    triggers.push("conflicting-evidence");
+  }
+  if (parseFlags?.includes("ambiguous-intent")) {
+    triggers.push("ambiguous-intent");
+  }
+  if (originalContent.length > 0) {
+    const totalFindLength = edits.reduce((sum, e) => sum + e.find.length, 0);
+    const changeRatio = totalFindLength / originalContent.length;
+    if (changeRatio > thresholds.destructiveRewriteThreshold) {
+      triggers.push("destructive-rewrite");
+    }
+  }
+  if (preview.edits.some((e) => e.safetyIssues.length > 0)) {
+    triggers.push("safety-failure");
+  }
+  if (conflicts.length === edits.length && edits.length > 0) {
+    triggers.push("all-conflicting");
+  }
+  return triggers;
+}
+function classifyEnrichmentResult(input) {
+  const { edits, originalContent, preview, conflicts, parseFlags, autoApplyEnabled, thresholds } = input;
+  if (edits.length === 0) {
+    return { state: "unenriched", triggers: [], avgConfidence: null };
+  }
+  const avgConfidence = edits.reduce((sum, e) => sum + (e.confidence ?? 1), 0) / edits.length;
+  const interventionTriggers = evaluateInterventionTriggers(
+    { edits, originalContent, preview, conflicts, parseFlags },
+    thresholds
+  );
+  if (interventionTriggers.length > 0) {
+    return { state: "human-required", triggers: interventionTriggers, avgConfidence };
+  }
+  if (autoApplyEnabled) {
+    const conflictIndices = new Set(conflicts.map((c) => c.editIndex));
+    const allSafe = edits.every((edit, i) => {
+      const risk = edit.risk ?? "safe";
+      const confidence = edit.confidence ?? 1;
+      const hasSafetyIssues = preview.edits[i]?.safetyIssues?.length > 0;
+      return risk === "safe" && confidence >= 0.8 && !conflictIndices.has(i) && !hasSafetyIssues;
+    });
+    if (allSafe) {
+      return { state: "auto-enriched", triggers: [], avgConfidence };
+    }
+  }
+  return { state: "suggested", triggers: [], avgConfidence };
+}
+async function invalidateIfContentChanged(vault, notePath, currentContent) {
+  const state = await loadEnrichmentState(vault, notePath);
+  if (state.state === "unenriched") return false;
+  const currentHash = await computeContentHash(currentContent);
+  if (currentHash === state.contentHash) return false;
+  await transitionEnrichmentState(vault, notePath, "unenriched", {
+    pendingPlan: null,
+    editDecisions: null,
+    preApplySnapshot: null,
+    triggers: []
+  });
+  return true;
+}
+
+// src/enrichment-orchestrator.ts
+var EnrichmentOrchestrator = class {
+  constructor(deps) {
+    this.queue = new BackgroundIndexingQueue();
+    this.debounceTimers = /* @__PURE__ */ new Map();
+    this.vault = deps.vault;
+    this.getSettings = deps.getSettings;
+    this.indexing = deps.indexing;
+    this.writeAssistantOutput = deps.writeAssistantOutput;
+  }
+  registerVaultEvents(registerEvent) {
+    registerEvent(
+      this.vault.on("modify", (file) => {
+        this.handleModify(file);
+      })
+    );
+  }
+  /** Visible for testing — handle a modify event with debounce + enqueue. */
+  handleModify(file) {
+    if (!file.path.endsWith(".md")) return;
+    if (file.path.startsWith("AI Copilot/")) return;
+    const settings = this.getSettings();
+    if (!settings.enrichmentEnabled) return;
+    const existing = this.debounceTimers.get(file.path);
+    if (existing) clearTimeout(existing);
+    const delayMs = Math.max(1, settings.enrichmentDebounceSec) * 1e3;
+    const timer = setTimeout(() => {
+      this.debounceTimers.delete(file.path);
+      this.enqueueEnrichment(file.path);
+    }, delayMs);
+    this.debounceTimers.set(file.path, timer);
+  }
+  enqueueEnrichment(notePath) {
+    this.queue.enqueue(async () => {
+      await this.runEnrichmentForNote(notePath);
+    });
+  }
+  /** Run the full enrichment pipeline for a single note. */
+  async runEnrichmentForNote(notePath) {
+    const settings = this.getSettings();
+    if (!this.vault.exists(notePath)) return;
+    const content = await this.vault.read(notePath);
+    if (settings.enrichmentPersistState) {
+      await invalidateIfContentChanged(this.vault, notePath, content);
+    }
+    const currentState = await loadEnrichmentState(this.vault, notePath);
+    if (currentState.state !== "unenriched") return;
+    const runId = `enrich-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const contentHash2 = await computeContentHash(content);
+    await transitionEnrichmentState(this.vault, notePath, "analyzing", {
+      runId,
+      contentHash: contentHash2
+    });
+    try {
+      const candidates = [{ path: notePath, content }];
+      const plan = buildRefinementPlan(candidates);
+      const prompt = buildRefinementPrompt(candidates, {
+        enableWebEnrichment: settings.enableWebEnrichment
+      });
+      const llmOutput = await buildClient(settings).chat(
+        `${toMarkdownPlan(plan)}
+
+${prompt}`,
+        buildPatchPlanSystemPrompt()
+      );
+      const fileContents = /* @__PURE__ */ new Map([[notePath, content]]);
+      const preview = buildRefinementPreview(llmOutput, fileContents, candidates);
+      const singlePreview = preview.singleFilePreviews.find((p) => p.plan.path === notePath);
+      if (!singlePreview || singlePreview.plan.edits.length === 0) {
+        await transitionEnrichmentState(this.vault, notePath, "unenriched", {});
+        return;
+      }
+      const edits = singlePreview.plan.edits;
+      const patchPreview = singlePreview.preview;
+      const conflicts = singlePreview.conflicts;
+      const classifyInput = {
+        edits,
+        originalContent: content,
+        preview: patchPreview,
+        conflicts,
+        autoApplyEnabled: settings.refinementAutoApply,
+        thresholds: {
+          confidenceThreshold: settings.enrichmentConfidenceThreshold,
+          destructiveRewriteThreshold: settings.enrichmentDestructiveRewriteThreshold
+        }
+      };
+      const classification = classifyEnrichmentResult(classifyInput);
+      if (classification.state === "unenriched") {
+        await transitionEnrichmentState(this.vault, notePath, "unenriched", {});
+        return;
+      }
+      if (classification.state === "auto-enriched") {
+        const decision = buildSafeAutoApplyDecision(preview);
+        const { result } = applyRefinementDecision(preview, decision, fileContents);
+        for (const sr of result.singleFileResults) {
+          if (sr.applied.transactions.some((t) => t.applied)) {
+            await this.vault.modify(sr.path, sr.applied.finalContent);
+          }
+        }
+        await transitionEnrichmentState(this.vault, notePath, "auto-enriched", {
+          avgConfidence: classification.avgConfidence,
+          pendingPlan: null,
+          model: this.getActiveModel(settings),
+          contextNotes: []
+        });
+        await this.writeAssistantOutput(
+          "Enrichment Log",
+          `## Auto-enriched: ${notePath}
+${toMarkdownRefinementPreview(preview)}`
+        );
+      } else {
+        await transitionEnrichmentState(this.vault, notePath, classification.state, {
+          avgConfidence: classification.avgConfidence,
+          triggers: classification.triggers,
+          pendingPlan: singlePreview.plan,
+          model: this.getActiveModel(settings),
+          contextNotes: []
+        });
+        await this.writeAssistantOutput(
+          "Enrichment Log",
+          `## ${classification.state}: ${notePath}
+${toMarkdownRefinementPreview(preview)}`
+        );
+      }
+    } catch (err) {
+      try {
+        await transitionEnrichmentState(this.vault, notePath, "unenriched", {});
+      } catch {
+      }
+      console.error(`AI Copilot enrichment failed for ${notePath}:`, err);
+    }
+  }
+  getActiveModel(settings) {
+    switch (settings.provider) {
+      case "openai":
+        return settings.openaiModel;
+      case "anthropic":
+        return settings.anthropicModel;
+      case "bedrock":
+        return settings.bedrockModel;
+      default:
+        return "none";
+    }
+  }
+  dispose() {
+    for (const timer of this.debounceTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.debounceTimers.clear();
+  }
+};
+
 // src/main.ts
 var AICopilotPlugin = class extends import_obsidian6.Plugin {
   constructor() {
@@ -3063,6 +3382,12 @@ var AICopilotPlugin = class extends import_obsidian6.Plugin {
       (query, max) => this.retrieval.getRelevantNotes(query, max),
       (name, body) => this.writeAssistantOutput(name, body)
     );
+    this.enrichment = new EnrichmentOrchestrator({
+      vault: this.vault_,
+      getSettings: () => this.settings,
+      indexing: this.indexing,
+      writeAssistantOutput: (name, body) => this.writeAssistantOutput(name, body)
+    });
   }
   async onload() {
     await this.loadSettings();
@@ -3103,10 +3428,12 @@ var AICopilotPlugin = class extends import_obsidian6.Plugin {
     );
     this.startRefinementLoop();
     this.indexing.registerVaultSyncEvents((evt) => this.registerEvent(evt));
+    this.enrichment.registerVaultEvents((evt) => this.registerEvent(evt));
     new import_obsidian6.Notice("AI Copilot loaded.");
   }
   onunload() {
     if (this.intervalId) window.clearInterval(this.intervalId);
+    this.enrichment.dispose();
   }
   async loadSettings() {
     this.settings = { ...DEFAULT_SETTINGS, ...await this.loadData() };
