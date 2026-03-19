@@ -2,6 +2,9 @@ import type { App } from "obsidian";
 import { PluginSettingTab, Setting } from "obsidian";
 import type AICopilotPlugin from "./main";
 
+/** Agent behavior mode controlling how the agent interacts with vault content. */
+export type AgentMode = "answer-only" | "propose-edit" | "auto-apply";
+
 export interface AICopilotSettings {
   provider: "openai" | "anthropic" | "bedrock" | "none";
   openaiApiKey: string;
@@ -30,6 +33,7 @@ export interface AICopilotSettings {
   rerankerTopK: number;
   rerankerType: "openai" | "heuristic";
   rerankerModel: string;
+  agentMode: AgentMode;
   agentMaxToolCalls: number;
   agentTimeoutMs: number;
   allowRemoteModels: boolean;
@@ -71,6 +75,7 @@ export const DEFAULT_SETTINGS: AICopilotSettings = {
   rerankerTopK: 8,
   rerankerType: "openai",
   rerankerModel: "gpt-4.1-mini",
+  agentMode: "auto-apply",
   agentMaxToolCalls: 10,
   agentTimeoutMs: 60000,
   allowRemoteModels: true,
@@ -97,6 +102,17 @@ function parseEmbeddingProvider(value: string): AICopilotSettings["embeddingProv
 function parseRerankerType(value: string): AICopilotSettings["rerankerType"] {
   return value === "openai" ? "openai" : "heuristic";
 }
+
+function parseAgentMode(value: string): AgentMode {
+  if (value === "answer-only" || value === "propose-edit" || value === "auto-apply") return value;
+  return "auto-apply";
+}
+
+export const AGENT_MODE_DESCRIPTIONS: Record<AgentMode, string> = {
+  "answer-only": "Read-only — agent can search and read notes but never creates or edits them",
+  "propose-edit": "Propose edits — agent suggests changes as inline diffs for you to accept or reject",
+  "auto-apply": "Auto-apply — safe edits are applied automatically; risky or destructive edits require your approval"
+};
 
 
 export class AICopilotSettingTab extends PluginSettingTab {
@@ -451,6 +467,22 @@ export class AICopilotSettingTab extends PluginSettingTab {
       );
 
     containerEl.createEl("h3", { text: "Agent Behavior" });
+
+    new Setting(containerEl)
+      .setName("Agent mode")
+      .setDesc(AGENT_MODE_DESCRIPTIONS[this.plugin.settings.agentMode])
+      .addDropdown((d) =>
+        d
+          .addOption("answer-only", "Answer only")
+          .addOption("propose-edit", "Propose edits")
+          .addOption("auto-apply", "Auto-apply")
+          .setValue(this.plugin.settings.agentMode)
+          .onChange(async (value: string) => {
+            this.plugin.settings.agentMode = parseAgentMode(value);
+            await this.plugin.saveSettings();
+            this.display();
+          })
+      );
 
     new Setting(containerEl)
       .setName("Max tool calls per query")

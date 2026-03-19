@@ -2,6 +2,7 @@ import type { VaultAdapter } from "./vault-adapter";
 import type { RetrievedNote } from "./semantic-retrieval";
 import { checkPathProtected, runSafetyChecks } from "./patch-safety";
 import type { PatchSafetyConfig } from "./patch-safety";
+import type { AgentMode } from "./settings";
 
 export interface ToolDefinition {
   name: string;
@@ -14,13 +15,28 @@ export interface ToolResult {
   is_error?: boolean;
 }
 
+/** Classification of an edit's risk level. */
+export type EditClassification = "safe" | "risky" | "destructive";
+
+/** A proposed edit returned in propose-edit mode instead of applying. */
+export interface ProposedEdit {
+  path: string;
+  oldContent: string;
+  newContent: string;
+  classification: EditClassification;
+  description: string;
+}
+
 export type NoteSearchFn = (query: string, maxResults: number) => Promise<RetrievedNote[]>;
 
 /** Approval callback for write operations. Returns true if approved. */
-export type ApproveEditFn = (description: string) => Promise<boolean>;
+export type ApproveEditFn = (description: string, proposed?: ProposedEdit) => Promise<boolean>;
 
 /** Snapshot callback for rollback support. Called with path and original content before writes. */
 export type SnapshotFn = (path: string, originalContent: string) => void;
+
+/** Callback invoked in propose-edit mode with the proposed change. Returns true if user accepts. */
+export type ProposeEditFn = (proposed: ProposedEdit) => Promise<boolean>;
 
 export interface AgentToolContext {
   vault: VaultAdapter;
@@ -29,8 +45,41 @@ export interface AgentToolContext {
   safetyConfig?: PatchSafetyConfig;
   approveEdit?: ApproveEditFn;
   onSnapshot?: SnapshotFn;
+  proposeEdit?: ProposeEditFn;
+  /** Agent behavior mode. Controls whether writes are blocked, proposed, or auto-applied. */
+  agentMode?: AgentMode;
   /** Destructive rewrite threshold (0-1). Writes replacing more than this ratio require approval. Default: 0.4 */
   destructiveThreshold?: number;
+}
+
+const READ_ONLY_TOOLS = new Set(["search_notes", "read_note", "list_notes"]);
+const WRITE_TOOLS = new Set(["write_note", "edit_note"]);
+
+/**
+ * Classify an edit based on the content change characteristics.
+ *
+ * - safe: minor formatting, tag addition, link fix (change ratio ≤ 10%)
+ * - risky: content rewrite, structural change (change ratio 10-50%)
+ * - destructive: >50% content change, removing sections
+ */
+export function classifyEdit(oldContent: string, newContent: string): EditClassification {
+  if (oldContent.length === 0) return "safe"; // new file creation
+
+  const changeRatio = contentChangeRatio(oldContent, newContent);
+
+  // Destructive: >50% change or significant content removal
+  if (changeRatio > 0.5) return "destructive";
+  if (newContent.length < oldContent.length * 0.5) return "destructive";
+
+  // Risky: notable content changes (>10%)
+  if (changeRatio > 0.1) return "risky";
+
+  // Check for structural changes even with small ratios
+  const oldHeadings = (oldContent.match(/^#{1,6}\s/gm) ?? []).length;
+  const newHeadings = (newContent.match(/^#{1,6}\s/gm) ?? []).length;
+  if (Math.abs(oldHeadings - newHeadings) >= 2) return "risky";
+
+  return "safe";
 }
 
 export const AGENT_TOOLS: ToolDefinition[] = [
@@ -130,11 +179,27 @@ export const AGENT_TOOLS: ToolDefinition[] = [
   }
 ];
 
+/** Get the tools available for a given agent mode. */
+export function getToolsForMode(mode: AgentMode | undefined): ToolDefinition[] {
+  if (mode === "answer-only") {
+    return AGENT_TOOLS.filter((t) => READ_ONLY_TOOLS.has(t.name));
+  }
+  return AGENT_TOOLS;
+}
+
 export async function executeTool(
   name: string,
   input: Record<string, unknown>,
   ctx: AgentToolContext
 ): Promise<ToolResult> {
+  // Block write tools in answer-only mode
+  if (ctx.agentMode === "answer-only" && WRITE_TOOLS.has(name)) {
+    return {
+      content: `Tool "${name}" is not available in answer-only mode. The agent can only search and read notes.`,
+      is_error: true
+    };
+  }
+
   switch (name) {
     case "search_notes":
       return executeSearchNotes(input, ctx);
