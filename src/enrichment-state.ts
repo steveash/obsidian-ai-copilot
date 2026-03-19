@@ -25,7 +25,8 @@ export type HumanInterventionTrigger =
   | "ambiguous-intent"
   | "destructive-rewrite"
   | "safety-failure"
-  | "all-conflicting";
+  | "all-conflicting"
+  | "cross-note";
 
 export interface EnrichmentStateRecord {
   /** Schema version for forward compatibility */

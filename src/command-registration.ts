@@ -16,6 +16,15 @@ import {
   type SmartRefinementSnapshot
 } from "./smart-refinement";
 import type { VaultAdapter } from "./vault-adapter";
+import {
+  analyzeCrossNoteRelationships,
+  toMarkdownCrossNoteReport,
+  buildCrossNotePatchPlan,
+} from "./cross-note-analysis";
+import {
+  transitionEnrichmentState,
+  computeContentHash,
+} from "./enrichment-state";
 
 export interface CommandContext {
   addCommand: (command: Command) => void;
@@ -201,6 +210,59 @@ export function registerPluginCommands(
   });
 
   ctx.addCommand({
+    id: "ai-copilot-cross-note-analysis",
+    name: "AI Copilot: Run cross-note analysis",
+    callback: async () => {
+      new Notice("AI Copilot: analyzing cross-note relationships…");
+      const settings = ctx.getSettings();
+
+      const analysis = await analyzeCrossNoteRelationships(ctx.vault);
+      const report = toMarkdownCrossNoteReport(analysis);
+      await ctx.writeAssistantOutput("Refinement Log", report);
+
+      // If enrichment state tracking is enabled, create enrichment records
+      // for notes with cross-note suggestions (always human-required)
+      if (settings.enrichmentPersistState) {
+        const patchPlan = buildCrossNotePatchPlan(analysis);
+        if (patchPlan) {
+          const runId = `cross-note-${Date.now()}`;
+          for (const file of patchPlan.files) {
+            try {
+              const content = await ctx.vault.read(file.path);
+              const contentHash = await computeContentHash(content);
+              await transitionEnrichmentState(ctx.vault, file.path, "analyzing", {
+                runId,
+                contentHash,
+              });
+              await transitionEnrichmentState(ctx.vault, file.path, "human-required", {
+                pendingPlan: { path: file.path, edits: file.edits },
+                triggers: ["cross-note"],
+                avgConfidence: file.edits.reduce((s, e) => s + (e.confidence ?? 0.5), 0) / file.edits.length,
+                contextNotes: patchPlan.files
+                  .filter((f) => f.path !== file.path)
+                  .map((f) => f.path),
+                model: "cross-note-analysis",
+              });
+            } catch {
+              // Note may not exist (stale ref target); skip enrichment state
+            }
+          }
+        }
+      }
+
+      const totalFindings =
+        analysis.missingBacklinks.length +
+        analysis.staleReferences.length +
+        analysis.tagSuggestions.length +
+        analysis.frontmatterSuggestions.length;
+
+      new Notice(
+        `AI Copilot: cross-note analysis complete — ${totalFindings} finding(s). See Refinement Log.`
+      );
+    }
+  });
+
+  ctx.addCommand({
     id: "ai-copilot-indexing-status",
     name: "AI Copilot: Show indexing queue status",
     callback: async () => {
@@ -261,7 +323,23 @@ export async function runRefinementFlow(
     }
   }
 
+  // Cross-note analysis (runs alongside per-note refinement)
+  let crossNoteReport = "";
+  try {
+    const analysis = await analyzeCrossNoteRelationships(vault);
+    const totalFindings =
+      analysis.missingBacklinks.length +
+      analysis.staleReferences.length +
+      analysis.tagSuggestions.length +
+      analysis.frontmatterSuggestions.length;
+    if (totalFindings > 0) {
+      crossNoteReport = `\n\n${toMarkdownCrossNoteReport(analysis)}`;
+    }
+  } catch {
+    // Cross-note analysis is best-effort; don't block refinement
+  }
+
   const md = toMarkdownRefinementPreview(preview);
   new Notice(`AI Copilot: scanned ${candidates.length} notes · TODOs ${preview.todoCount}`);
-  await writeAssistantOutput("Refinement Log", `${toMarkdownPlan(plan)}\n\n${md}\n\n## Raw LLM Output\n${output}`);
+  await writeAssistantOutput("Refinement Log", `${toMarkdownPlan(plan)}\n\n${md}${crossNoteReport}\n\n## Raw LLM Output\n${output}`);
 }
