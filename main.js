@@ -1936,6 +1936,7 @@ ${text}
 }
 
 // src/agent-tools.ts
+init_patch_safety();
 var AGENT_TOOLS = [
   {
     name: "search_notes",
@@ -1977,6 +1978,46 @@ var AGENT_TOOLS = [
         }
       }
     }
+  },
+  {
+    name: "write_note",
+    description: "Create a new note or overwrite an existing note in the vault. Paths must be vault-relative (e.g. 'Projects/my-note.md'). Protected paths (.obsidian/, .git/, etc.) are blocked. Overwriting an existing note with large content changes may require user approval.",
+    input_schema: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description: "The file path of the note to create or overwrite (e.g. 'Projects/new-note.md')"
+        },
+        content: {
+          type: "string",
+          description: "The full markdown content to write to the note"
+        }
+      },
+      required: ["path", "content"]
+    }
+  },
+  {
+    name: "edit_note",
+    description: "Apply a targeted find-and-replace edit to an existing note. The find string must match exactly one location in the note. Protected paths and content containing secrets are blocked.",
+    input_schema: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description: "The file path of the note to edit (e.g. 'Projects/my-note.md')"
+        },
+        find: {
+          type: "string",
+          description: "The exact text to find in the note (must match exactly once)"
+        },
+        replace: {
+          type: "string",
+          description: "The text to replace the found text with"
+        }
+      },
+      required: ["path", "find", "replace"]
+    }
   }
 ];
 async function executeTool(name, input, ctx) {
@@ -1987,6 +2028,10 @@ async function executeTool(name, input, ctx) {
       return executeReadNote(input, ctx);
     case "list_notes":
       return executeListNotes(input, ctx);
+    case "write_note":
+      return executeWriteNote(input, ctx);
+    case "edit_note":
+      return executeEditNote(input, ctx);
     default:
       return { content: `Unknown tool: ${name}`, is_error: true };
   }
@@ -2030,9 +2075,101 @@ async function executeListNotes(input, ctx) {
   }
   return { content: lines.join("\n") };
 }
+function checkVaultScope(path, config) {
+  if (!path) return { content: "Error: path is required", is_error: true };
+  const normalized = path.replace(/\\/g, "/");
+  if (normalized.startsWith("/") || normalized.includes("../")) {
+    return { content: `Error: path must be vault-relative without traversal: ${path}`, is_error: true };
+  }
+  const pathCheck = checkPathProtected(normalized, config?.protectedPaths);
+  if (!pathCheck.safe) {
+    return { content: `Error: ${pathCheck.issues.join("; ")}`, is_error: true };
+  }
+  return null;
+}
+function contentChangeRatio(oldContent, newContent) {
+  if (oldContent.length === 0) return 0;
+  const maxLen = Math.max(oldContent.length, newContent.length);
+  let diffChars = 0;
+  for (let i = 0; i < maxLen; i++) {
+    if (oldContent[i] !== newContent[i]) diffChars++;
+  }
+  return diffChars / oldContent.length;
+}
+async function executeWriteNote(input, ctx) {
+  const path = String(input.path ?? "");
+  const content = String(input.content ?? "");
+  const scopeError = checkVaultScope(path, ctx.safetyConfig);
+  if (scopeError) return scopeError;
+  if (!content) return { content: "Error: content is required", is_error: true };
+  const isOverwrite = ctx.vault.exists(path);
+  if (isOverwrite) {
+    const existingContent = await ctx.vault.read(path);
+    const threshold = ctx.destructiveThreshold ?? 0.4;
+    const changeRatio = contentChangeRatio(existingContent, content);
+    if (changeRatio > threshold && ctx.approveEdit) {
+      const approved = await ctx.approveEdit(
+        `Overwriting "${path}" changes ${Math.round(changeRatio * 100)}% of content (threshold: ${Math.round(threshold * 100)}%)`
+      );
+      if (!approved) {
+        return { content: `Edit rejected: overwriting "${path}" would change ${Math.round(changeRatio * 100)}% of content. User approval required.`, is_error: true };
+      }
+    }
+    ctx.onSnapshot?.(path, existingContent);
+    await ctx.vault.modify(path, content);
+    return { content: `Note updated: ${path} (${content.length} chars, replaced ${existingContent.length} chars)` };
+  }
+  const lastSlash = path.lastIndexOf("/");
+  if (lastSlash > 0) {
+    const folder = path.slice(0, lastSlash);
+    if (!ctx.vault.exists(folder)) {
+      await ctx.vault.createFolder(folder);
+    }
+  }
+  await ctx.vault.create(path, content);
+  return { content: `Note created: ${path} (${content.length} chars)` };
+}
+async function executeEditNote(input, ctx) {
+  const path = String(input.path ?? "");
+  const find = String(input.find ?? "");
+  const replace = String(input.replace ?? "");
+  const scopeError = checkVaultScope(path, ctx.safetyConfig);
+  if (scopeError) return scopeError;
+  if (!find) return { content: "Error: find is required", is_error: true };
+  if (!ctx.vault.exists(path)) {
+    return { content: `Note not found: ${path}`, is_error: true };
+  }
+  const safetyResult = runSafetyChecks(path, find, replace, ctx.safetyConfig);
+  if (!safetyResult.safe) {
+    return { content: `Safety check failed: ${safetyResult.issues.join("; ")}`, is_error: true };
+  }
+  const existingContent = await ctx.vault.read(path);
+  const firstIdx = existingContent.indexOf(find);
+  if (firstIdx === -1) {
+    return { content: `Error: find string not found in "${path}"`, is_error: true };
+  }
+  const secondIdx = existingContent.indexOf(find, firstIdx + 1);
+  if (secondIdx !== -1) {
+    return { content: `Error: find string matches multiple locations in "${path}" (ambiguous edit)`, is_error: true };
+  }
+  const newContent = existingContent.slice(0, firstIdx) + replace + existingContent.slice(firstIdx + find.length);
+  const threshold = ctx.destructiveThreshold ?? 0.4;
+  const changeRatio = contentChangeRatio(existingContent, newContent);
+  if (changeRatio > threshold && ctx.approveEdit) {
+    const approved = await ctx.approveEdit(
+      `Editing "${path}" changes ${Math.round(changeRatio * 100)}% of content (threshold: ${Math.round(threshold * 100)}%)`
+    );
+    if (!approved) {
+      return { content: `Edit rejected: editing "${path}" would change ${Math.round(changeRatio * 100)}% of content. User approval required.`, is_error: true };
+    }
+  }
+  ctx.onSnapshot?.(path, existingContent);
+  await ctx.vault.modify(path, newContent);
+  return { content: `Note edited: ${path} (replaced ${find.length} chars with ${replace.length} chars)` };
+}
 
 // src/agent-loop.ts
-var AGENT_SYSTEM_PROMPT = "You are an AI assistant integrated into an Obsidian vault. You help users understand, search, and navigate their notes.\n\nYou have tools to search, read, and list notes in the vault. Use them to find relevant information before answering. Always ground your answers in the actual note content.\n\nWhen citing information, mention the note path so the user can find it. If you cannot find relevant information in the vault, say so honestly.\n\nBe concise and helpful. Focus on answering the user's question using vault content.";
+var AGENT_SYSTEM_PROMPT = "You are an AI assistant integrated into an Obsidian vault. You help users understand, search, navigate, and edit their notes.\n\nYou have tools to search, read, list, write, and edit notes in the vault. Use search and read tools to find relevant information before answering. Use write_note to create new notes and edit_note for targeted find-and-replace edits to existing notes. Always ground your answers in actual note content.\n\nWhen editing notes, prefer small targeted edits via edit_note over full rewrites via write_note. Large content changes may require user approval.\n\nWhen citing information, mention the note path so the user can find it. If you cannot find relevant information in the vault, say so honestly.\n\nBe concise and helpful. Focus on answering the user's question using vault content.";
 async function runAgentLoop(client, query, toolCtx, settings, callbacks) {
   const maxToolCalls = settings.agentMaxToolCalls;
   const messages = [{ role: "user", content: query }];

@@ -77,12 +77,14 @@ function makeToolCtx(vault = makeVault()): AgentToolContext {
 }
 
 describe("AGENT_TOOLS", () => {
-  it("defines three read-only tools", () => {
-    expect(AGENT_TOOLS).toHaveLength(3);
+  it("defines five tools (3 read + 2 write)", () => {
+    expect(AGENT_TOOLS).toHaveLength(5);
     const names = AGENT_TOOLS.map((t) => t.name);
     expect(names).toContain("search_notes");
     expect(names).toContain("read_note");
     expect(names).toContain("list_notes");
+    expect(names).toContain("write_note");
+    expect(names).toContain("edit_note");
   });
 
   it("each tool has name, description, and input_schema", () => {
@@ -143,6 +145,198 @@ describe("executeTool", () => {
     const result = await executeTool("nonexistent_tool", {}, ctx);
     expect(result.is_error).toBe(true);
     expect(result.content).toContain("Unknown tool");
+  });
+});
+
+describe("executeTool: write_note", () => {
+  it("creates a new note", async () => {
+    const ctx = makeToolCtx();
+    const result = await executeTool("write_note", { path: "New/note.md", content: "# Hello" }, ctx);
+    expect(result.is_error).toBeUndefined();
+    expect(result.content).toContain("Note created");
+    expect(result.content).toContain("New/note.md");
+    const written = await ctx.vault.read("New/note.md");
+    expect(written).toBe("# Hello");
+  });
+
+  it("overwrites an existing note", async () => {
+    const ctx = makeToolCtx();
+    const result = await executeTool("write_note", { path: "Projects/alpha.md", content: "# Alpha v2\nUpdated." }, ctx);
+    expect(result.is_error).toBeUndefined();
+    expect(result.content).toContain("Note updated");
+    const written = await ctx.vault.read("Projects/alpha.md");
+    expect(written).toBe("# Alpha v2\nUpdated.");
+  });
+
+  it("blocks protected paths", async () => {
+    const ctx = makeToolCtx();
+    const result = await executeTool("write_note", { path: ".obsidian/config.json", content: "{}" }, ctx);
+    expect(result.is_error).toBe(true);
+    expect(result.content).toContain("protected");
+  });
+
+  it("blocks path traversal", async () => {
+    const ctx = makeToolCtx();
+    const result = await executeTool("write_note", { path: "../etc/passwd", content: "hack" }, ctx);
+    expect(result.is_error).toBe(true);
+    expect(result.content).toContain("traversal");
+  });
+
+  it("blocks absolute paths", async () => {
+    const ctx = makeToolCtx();
+    const result = await executeTool("write_note", { path: "/tmp/evil.md", content: "bad" }, ctx);
+    expect(result.is_error).toBe(true);
+    expect(result.content).toContain("traversal");
+  });
+
+  it("requires approval for destructive overwrite", async () => {
+    const approve = vi.fn().mockResolvedValue(false);
+    const ctx = makeToolCtx();
+    ctx.approveEdit = approve;
+    ctx.destructiveThreshold = 0.4;
+
+    // Completely different content triggers approval
+    const result = await executeTool("write_note", {
+      path: "Projects/alpha.md",
+      content: "Completely different content that replaces everything with new stuff."
+    }, ctx);
+
+    expect(approve).toHaveBeenCalledOnce();
+    expect(result.is_error).toBe(true);
+    expect(result.content).toContain("rejected");
+  });
+
+  it("calls snapshot callback before overwrite", async () => {
+    const snapshot = vi.fn();
+    const ctx = makeToolCtx();
+    ctx.onSnapshot = snapshot;
+
+    await executeTool("write_note", { path: "Projects/alpha.md", content: "# Alpha\nThis is the alpha project. Small edit." }, ctx);
+    expect(snapshot).toHaveBeenCalledWith("Projects/alpha.md", "# Alpha\nThis is the alpha project.");
+  });
+
+  it("returns error when content is empty", async () => {
+    const ctx = makeToolCtx();
+    const result = await executeTool("write_note", { path: "test.md", content: "" }, ctx);
+    expect(result.is_error).toBe(true);
+    expect(result.content).toContain("content is required");
+  });
+});
+
+describe("executeTool: edit_note", () => {
+  it("applies a find-and-replace edit", async () => {
+    const ctx = makeToolCtx();
+    const result = await executeTool("edit_note", {
+      path: "Projects/alpha.md",
+      find: "alpha project",
+      replace: "Alpha Project (v2)"
+    }, ctx);
+    expect(result.is_error).toBeUndefined();
+    expect(result.content).toContain("Note edited");
+    const content = await ctx.vault.read("Projects/alpha.md");
+    expect(content).toBe("# Alpha\nThis is the Alpha Project (v2).");
+  });
+
+  it("returns error when find string not found", async () => {
+    const ctx = makeToolCtx();
+    const result = await executeTool("edit_note", {
+      path: "Projects/alpha.md",
+      find: "nonexistent text",
+      replace: "replacement"
+    }, ctx);
+    expect(result.is_error).toBe(true);
+    expect(result.content).toContain("not found");
+  });
+
+  it("returns error for ambiguous match", async () => {
+    const vault = new InMemoryVaultAdapter([
+      { path: "test.md", content: "foo bar foo baz", mtime: Date.now() }
+    ]);
+    const ctx = makeToolCtx(vault);
+    const result = await executeTool("edit_note", {
+      path: "test.md",
+      find: "foo",
+      replace: "qux"
+    }, ctx);
+    expect(result.is_error).toBe(true);
+    expect(result.content).toContain("ambiguous");
+  });
+
+  it("blocks protected paths", async () => {
+    const ctx = makeToolCtx();
+    const result = await executeTool("edit_note", {
+      path: ".git/config",
+      find: "something",
+      replace: "else"
+    }, ctx);
+    expect(result.is_error).toBe(true);
+    expect(result.content).toContain("protected");
+  });
+
+  it("blocks edits containing secrets", async () => {
+    const ctx = makeToolCtx();
+    const result = await executeTool("edit_note", {
+      path: "Projects/alpha.md",
+      find: "alpha project",
+      replace: "api_key: sk-ant-abcdefghijklmnopqrstuvwxyz1234567890"
+    }, ctx);
+    expect(result.is_error).toBe(true);
+    expect(result.content).toContain("Safety check failed");
+  });
+
+  it("returns error for missing file", async () => {
+    const ctx = makeToolCtx();
+    const result = await executeTool("edit_note", {
+      path: "nonexistent.md",
+      find: "a",
+      replace: "b"
+    }, ctx);
+    expect(result.is_error).toBe(true);
+    expect(result.content).toContain("Note not found");
+  });
+
+  it("calls snapshot callback before edit", async () => {
+    const snapshot = vi.fn();
+    const ctx = makeToolCtx();
+    ctx.onSnapshot = snapshot;
+
+    await executeTool("edit_note", {
+      path: "Projects/alpha.md",
+      find: "alpha project",
+      replace: "alpha project v2"
+    }, ctx);
+    expect(snapshot).toHaveBeenCalledWith("Projects/alpha.md", "# Alpha\nThis is the alpha project.");
+  });
+
+  it("requires approval for destructive edit", async () => {
+    const vault = new InMemoryVaultAdapter([
+      { path: "small.md", content: "hello", mtime: Date.now() }
+    ]);
+    const approve = vi.fn().mockResolvedValue(false);
+    const ctx = makeToolCtx(vault);
+    ctx.approveEdit = approve;
+    ctx.destructiveThreshold = 0.4;
+
+    const result = await executeTool("edit_note", {
+      path: "small.md",
+      find: "hello",
+      replace: "completely different and much longer text that changes everything"
+    }, ctx);
+
+    expect(approve).toHaveBeenCalledOnce();
+    expect(result.is_error).toBe(true);
+    expect(result.content).toContain("rejected");
+  });
+
+  it("returns error when find is empty", async () => {
+    const ctx = makeToolCtx();
+    const result = await executeTool("edit_note", {
+      path: "Projects/alpha.md",
+      find: "",
+      replace: "something"
+    }, ctx);
+    expect(result.is_error).toBe(true);
+    expect(result.content).toContain("find is required");
   });
 });
 
@@ -298,11 +492,13 @@ describe("runAgentLoop", () => {
     );
 
     const tools = chatMessages.mock.calls[0][2];
-    expect(tools).toHaveLength(3);
+    expect(tools).toHaveLength(5);
     expect(tools.map((t: { name: string }) => t.name)).toEqual([
       "search_notes",
       "read_note",
-      "list_notes"
+      "list_notes",
+      "write_note",
+      "edit_note"
     ]);
   });
 });
