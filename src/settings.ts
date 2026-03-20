@@ -45,6 +45,8 @@ export interface AICopilotSettings {
   enrichmentPersistState: boolean;
   enrichmentEnabled: boolean;
   enrichmentDebounceSec: number;
+  crossNoteEnrichment: boolean;
+  requireApprovalForNewFiles: boolean;
 }
 
 export const DEFAULT_SETTINGS: AICopilotSettings = {
@@ -86,7 +88,9 @@ export const DEFAULT_SETTINGS: AICopilotSettings = {
   enrichmentDestructiveRewriteThreshold: 0.3,
   enrichmentPersistState: true,
   enrichmentEnabled: false,
-  enrichmentDebounceSec: 5
+  enrichmentDebounceSec: 5,
+  crossNoteEnrichment: false,
+  requireApprovalForNewFiles: true
 };
 
 function parseProvider(value: string): AICopilotSettings["provider"] {
@@ -557,11 +561,11 @@ export class AICopilotSettingTab extends PluginSettingTab {
         })
       );
 
-    containerEl.createEl("h3", { text: "Enrichment State" });
+    containerEl.createEl("h3", { text: "Enrichment" });
 
     new Setting(containerEl)
       .setName("Enable on-save enrichment")
-      .setDesc("Trigger async enrichment when a note is saved")
+      .setDesc("Automatically trigger enrichment when a note is saved — adds tags, links, and metadata")
       .addToggle((tg) =>
         tg.setValue(this.plugin.settings.enrichmentEnabled).onChange(async (value) => {
           this.plugin.settings.enrichmentEnabled = value;
@@ -571,7 +575,7 @@ export class AICopilotSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Enrichment debounce (seconds)")
-      .setDesc("Cooldown per note before triggering enrichment after save")
+      .setDesc("Wait this many seconds after the last save before running enrichment (prevents rapid re-triggers)")
       .addSlider((s) =>
         s
           .setLimits(1, 30, 1)
@@ -584,18 +588,8 @@ export class AICopilotSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Persist enrichment state")
-      .setDesc("Track per-note enrichment state in sidecar files")
-      .addToggle((tg) =>
-        tg.setValue(this.plugin.settings.enrichmentPersistState).onChange(async (value) => {
-          this.plugin.settings.enrichmentPersistState = value;
-          await this.plugin.saveSettings();
-        })
-      );
-
-    new Setting(containerEl)
       .setName("Enrichment confidence threshold")
-      .setDesc("Below this average confidence, notes require human review (0.0–1.0)")
+      .setDesc("Minimum confidence score (0.0–1.0) for auto-applying enrichments — below this, changes go to the review queue")
       .addText((t) =>
         t.setValue(String(this.plugin.settings.enrichmentConfidenceThreshold)).onChange(async (value) => {
           const n = Number(value);
@@ -607,8 +601,30 @@ export class AICopilotSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Destructive rewrite threshold")
-      .setDesc("Above this content-change ratio, notes require human review (0.0–1.0)")
+      .setName("Cross-note enrichment")
+      .setDesc("Analyze relationships across notes to suggest links, merge duplicates, and surface contradictions")
+      .addToggle((tg) =>
+        tg.setValue(this.plugin.settings.crossNoteEnrichment).onChange(async (value) => {
+          this.plugin.settings.crossNoteEnrichment = value;
+          await this.plugin.saveSettings();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Persist enrichment state")
+      .setDesc("Track per-note enrichment state in sidecar files so enrichment resumes across restarts")
+      .addToggle((tg) =>
+        tg.setValue(this.plugin.settings.enrichmentPersistState).onChange(async (value) => {
+          this.plugin.settings.enrichmentPersistState = value;
+          await this.plugin.saveSettings();
+        })
+      );
+
+    containerEl.createEl("h3", { text: "Approval + Safety" });
+
+    new Setting(containerEl)
+      .setName("Destructive edit threshold")
+      .setDesc("Content-change ratio (0.0–1.0) above which edits require your approval — prevents large unintended rewrites")
       .addText((t) =>
         t.setValue(String(this.plugin.settings.enrichmentDestructiveRewriteThreshold)).onChange(async (value) => {
           const n = Number(value);
@@ -616,6 +632,16 @@ export class AICopilotSettingTab extends PluginSettingTab {
             this.plugin.settings.enrichmentDestructiveRewriteThreshold = n;
             await this.plugin.saveSettings();
           }
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Require approval for new file creation")
+      .setDesc("When enabled, the agent must get your approval before creating new notes in your vault")
+      .addToggle((tg) =>
+        tg.setValue(this.plugin.settings.requireApprovalForNewFiles).onChange(async (value) => {
+          this.plugin.settings.requireApprovalForNewFiles = value;
+          await this.plugin.saveSettings();
         })
       );
   }

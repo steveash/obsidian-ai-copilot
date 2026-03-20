@@ -23,5 +23,20 @@ export function validateSettings(input: AICopilotSettings): string[] {
     issues.push("maxPromptChars must be between 2000 and 100000.");
   }
   if (input.rerankerTopK < 1) issues.push("rerankerTopK must be >= 1.");
+  if (input.agentMaxToolCalls < 1 || input.agentMaxToolCalls > 30) {
+    issues.push("agentMaxToolCalls must be between 1 and 30.");
+  }
+  if (input.agentTimeoutMs < 10000 || input.agentTimeoutMs > 300000) {
+    issues.push("agentTimeoutMs must be between 10000 and 300000.");
+  }
+  if (input.enrichmentDebounceSec < 1 || input.enrichmentDebounceSec > 30) {
+    issues.push("enrichmentDebounceSec must be between 1 and 30.");
+  }
+  if (input.enrichmentConfidenceThreshold < 0 || input.enrichmentConfidenceThreshold > 1) {
+    issues.push("enrichmentConfidenceThreshold must be between 0 and 1.");
+  }
+  if (input.enrichmentDestructiveRewriteThreshold < 0 || input.enrichmentDestructiveRewriteThreshold > 1) {
+    issues.push("enrichmentDestructiveRewriteThreshold must be between 0 and 1.");
+  }
   return issues;
 }

@@ -32,6 +32,7 @@ const BASE_SETTINGS = {
   allowRemoteModels: true,
   redactSensitiveLogs: true,
   maxPromptChars: 20000,
+  agentMode: "auto-apply" as const,
   agentMaxToolCalls: 10,
   agentTimeoutMs: 60000,
   strictConfigValidation: true,
@@ -39,7 +40,9 @@ const BASE_SETTINGS = {
   enrichmentDestructiveRewriteThreshold: 0.3,
   enrichmentPersistState: true,
   enrichmentEnabled: false,
-  enrichmentDebounceSec: 5
+  enrichmentDebounceSec: 5,
+  crossNoteEnrichment: false,
+  requireApprovalForNewFiles: true
 };
 
 describe("settings validation", () => {
@@ -56,5 +59,34 @@ describe("settings validation", () => {
   it("accepts sane defaults", () => {
     const issues = validateSettings(BASE_SETTINGS);
     expect(issues).toEqual([]);
+  });
+
+  it("flags agent max tool calls out of range", () => {
+    const issues = validateSettings({ ...BASE_SETTINGS, agentMaxToolCalls: 0 });
+    expect(issues).toContain("agentMaxToolCalls must be between 1 and 30.");
+    const issues2 = validateSettings({ ...BASE_SETTINGS, agentMaxToolCalls: 50 });
+    expect(issues2).toContain("agentMaxToolCalls must be between 1 and 30.");
+  });
+
+  it("flags agent timeout out of range", () => {
+    const issues = validateSettings({ ...BASE_SETTINGS, agentTimeoutMs: 5000 });
+    expect(issues).toContain("agentTimeoutMs must be between 10000 and 300000.");
+  });
+
+  it("flags enrichment debounce out of range", () => {
+    const issues = validateSettings({ ...BASE_SETTINGS, enrichmentDebounceSec: 0 });
+    expect(issues).toContain("enrichmentDebounceSec must be between 1 and 30.");
+  });
+
+  it("flags enrichment confidence threshold out of range", () => {
+    const issues = validateSettings({ ...BASE_SETTINGS, enrichmentConfidenceThreshold: -0.1 });
+    expect(issues).toContain("enrichmentConfidenceThreshold must be between 0 and 1.");
+    const issues2 = validateSettings({ ...BASE_SETTINGS, enrichmentConfidenceThreshold: 1.5 });
+    expect(issues2).toContain("enrichmentConfidenceThreshold must be between 0 and 1.");
+  });
+
+  it("flags destructive rewrite threshold out of range", () => {
+    const issues = validateSettings({ ...BASE_SETTINGS, enrichmentDestructiveRewriteThreshold: 2.0 });
+    expect(issues).toContain("enrichmentDestructiveRewriteThreshold must be between 0 and 1.");
   });
 });

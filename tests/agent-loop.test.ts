@@ -34,6 +34,7 @@ const BASE: AICopilotSettings = {
   rerankerTopK: 8,
   rerankerType: "openai",
   rerankerModel: "gpt-4.1-mini",
+  agentMode: "auto-apply" as const,
   agentMaxToolCalls: 10,
   agentTimeoutMs: 60000,
   allowRemoteModels: true,
@@ -44,7 +45,9 @@ const BASE: AICopilotSettings = {
   enrichmentDestructiveRewriteThreshold: 0.3,
   enrichmentPersistState: true,
   enrichmentEnabled: false,
-  enrichmentDebounceSec: 5
+  enrichmentDebounceSec: 5,
+  crossNoteEnrichment: false,
+  requireApprovalForNewFiles: true
 };
 
 function makeSettings(overrides: Partial<AICopilotSettings> = {}): AICopilotSettings {

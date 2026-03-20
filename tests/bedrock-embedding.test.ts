@@ -35,6 +35,7 @@ const BASE: AICopilotSettings = {
   allowRemoteModels: true,
   redactSensitiveLogs: true,
   maxPromptChars: 20000,
+  agentMode: "auto-apply" as const,
   agentMaxToolCalls: 10,
   agentTimeoutMs: 60000,
   strictConfigValidation: true,
@@ -42,7 +43,9 @@ const BASE: AICopilotSettings = {
   enrichmentDestructiveRewriteThreshold: 0.3,
   enrichmentPersistState: true,
   enrichmentEnabled: false,
-  enrichmentDebounceSec: 5
+  enrichmentDebounceSec: 5,
+  crossNoteEnrichment: false,
+  requireApprovalForNewFiles: true
 };
 
 describe("BedrockEmbeddingProvider", () => {
