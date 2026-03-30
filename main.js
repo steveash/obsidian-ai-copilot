@@ -42536,7 +42536,7 @@ async function generateText({
   experimental_download: download2,
   experimental_context,
   experimental_include: include,
-  _internal: { generateId: generateId2 = originalGenerateId } = {},
+  _internal: { generateId: generateId22 = originalGenerateId } = {},
   experimental_onStart: onStart,
   experimental_onStepStart: onStepStart,
   experimental_onToolCallStart: onToolCallStart,
@@ -42846,7 +42846,7 @@ async function generateText({
                       headers: headersWithUserAgent
                     });
                     const responseData = {
-                      id: (_b23 = (_a232 = result.response) == null ? void 0 : _a232.id) != null ? _b23 : generateId2(),
+                      id: (_b23 = (_a232 = result.response) == null ? void 0 : _a232.id) != null ? _b23 : generateId22(),
                       timestamp: (_d22 = (_c22 = result.response) == null ? void 0 : _c22.timestamp) != null ? _d22 : /* @__PURE__ */ new Date(),
                       modelId: (_f2 = (_e22 = result.response) == null ? void 0 : _e22.modelId) != null ? _f2 : stepModel.modelId,
                       headers: (_g2 = result.response) == null ? void 0 : _g2.headers,
@@ -42941,7 +42941,7 @@ async function generateText({
               })) {
                 toolApprovalRequests[toolCall.toolCallId] = {
                   type: "tool-approval-request",
-                  approvalId: generateId2(),
+                  approvalId: generateId22(),
                   toolCall
                 };
               }
@@ -61620,15 +61620,16 @@ async function executeEditNote(input, ctx) {
 
 // src/agent-loop.ts
 var AGENT_SYSTEM_PROMPT = "You are an AI assistant integrated into an Obsidian vault. You help users understand, search, navigate, and edit their notes.\n\nYou have tools to search, read, list, write, and edit notes in the vault. Use search and read tools to find relevant information before answering. Use write_note to create new notes and edit_note for targeted find-and-replace edits to existing notes. Always ground your answers in actual note content.\n\nWhen editing notes, prefer small targeted edits via edit_note over full rewrites via write_note. Large content changes may require user approval.\n\nWhen citing information, mention the note path so the user can find it. If you cannot find relevant information in the vault, say so honestly.\n\nBe concise and helpful. Focus on answering the user's question using vault content.";
-async function runAgentLoop(client, query, toolCtx, settings, callbacks) {
+async function runAgentLoop(client, query, toolCtx, settings, callbacks, priorMessages, systemPrompt) {
   const maxToolCalls = settings.agentMaxToolCalls;
-  const messages = [{ role: "user", content: query }];
+  const messages = priorMessages ? [...priorMessages] : [{ role: "user", content: query }];
+  const system = systemPrompt ?? AGENT_SYSTEM_PROMPT;
   const citedPaths = /* @__PURE__ */ new Map();
   let toolCallCount = 0;
   for (let i = 0; i < maxToolCalls + 1; i++) {
     const response = await client.chatMessages(
       messages,
-      AGENT_SYSTEM_PROMPT,
+      system,
       AGENT_TOOLS,
       4096
     );
@@ -61689,6 +61690,194 @@ function buildCitations(citedPaths) {
   return [...citedPaths.entries()].sort((a, b) => b[1] - a[1]).map(([path]) => ({ path }));
 }
 
+// src/conversation-manager.ts
+var CONVERSATIONS_DIR = "AI Copilot/Conversations";
+var ConversationManager = class {
+  constructor(vault, maxContextMessages = 20) {
+    this.vault = vault;
+    this.maxContextMessages = maxContextMessages;
+    this.conversations = /* @__PURE__ */ new Map();
+  }
+  /** Create a new conversation and persist it. */
+  async create(topic, model) {
+    const id2 = generateId2();
+    const now2 = (/* @__PURE__ */ new Date()).toISOString();
+    const conv = {
+      meta: { id: id2, topic, model, createdAt: now2, updatedAt: now2 },
+      messages: []
+    };
+    this.conversations.set(id2, conv);
+    await this.persist(conv);
+    return conv;
+  }
+  /** Get a conversation by ID (from cache or vault). */
+  async get(id2) {
+    const cached2 = this.conversations.get(id2);
+    if (cached2) return cached2;
+    return this.loadFromVault(id2);
+  }
+  /** Add a message to a conversation and persist. */
+  async addMessage(id2, role, content) {
+    const conv = await this.get(id2);
+    if (!conv) throw new Error(`Conversation not found: ${id2}`);
+    conv.messages.push({ role, content, timestamp: Date.now() });
+    conv.meta.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+    await this.persist(conv);
+  }
+  /**
+   * Return the sliding window of messages for the context window,
+   * keeping the most recent messages up to maxContextMessages.
+   * Always includes any system messages from the start.
+   */
+  getContextWindow(conv) {
+    const systemMessages = conv.messages.filter((m2) => m2.role === "system");
+    const nonSystem = conv.messages.filter((m2) => m2.role !== "system");
+    if (nonSystem.length <= this.maxContextMessages) {
+      return [...systemMessages, ...nonSystem];
+    }
+    const window2 = nonSystem.slice(-this.maxContextMessages);
+    return [...systemMessages, ...window2];
+  }
+  /**
+   * Build AgentMessage[] from the context window for use with the agent loop.
+   * System messages are excluded (they should be injected as the system prompt).
+   */
+  toAgentMessages(conv) {
+    const window2 = this.getContextWindow(conv);
+    return window2.filter((m2) => m2.role !== "system").map((m2) => ({
+      role: m2.role,
+      content: m2.content
+    }));
+  }
+  /** Extract system messages from the conversation for use as system prompt context. */
+  getSystemContext(conv) {
+    return conv.messages.filter((m2) => m2.role === "system").map((m2) => m2.content);
+  }
+  /** List all conversation metadata by reading the conversations directory. */
+  async list() {
+    const files = this.vault.listMarkdownFiles();
+    const convFiles = files.filter((f2) => f2.path.startsWith(CONVERSATIONS_DIR + "/"));
+    const metas = [];
+    for (const file2 of convFiles) {
+      try {
+        const content = await this.vault.read(file2.path);
+        const meta3 = parseFrontmatter(content);
+        if (meta3) metas.push(meta3);
+      } catch {
+      }
+    }
+    return metas.sort(
+      (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
+    );
+  }
+  /** Load a conversation from vault by scanning for the matching ID in frontmatter. */
+  async loadFromVault(id2) {
+    const files = this.vault.listMarkdownFiles();
+    const convFiles = files.filter((f2) => f2.path.startsWith(CONVERSATIONS_DIR + "/"));
+    for (const file2 of convFiles) {
+      try {
+        const content = await this.vault.read(file2.path);
+        const conv = parseConversationFile(content);
+        if (conv && conv.meta.id === id2) {
+          this.conversations.set(id2, conv);
+          return conv;
+        }
+      } catch {
+      }
+    }
+    return null;
+  }
+  /** Persist a conversation as a Markdown file with YAML frontmatter. */
+  async persist(conv) {
+    await this.ensureFolder();
+    const path = this.conversationPath(conv.meta.topic);
+    const content = serializeConversation(conv);
+    if (this.vault.exists(path)) {
+      await this.vault.modify(path, content);
+    } else {
+      await this.vault.create(path, content);
+    }
+  }
+  conversationPath(topic) {
+    const safeTopic = topic.replace(/[/\\:*?"<>|]/g, "-").slice(0, 100);
+    return `${CONVERSATIONS_DIR}/${safeTopic}.md`;
+  }
+  async ensureFolder() {
+    if (!this.vault.exists("AI Copilot")) {
+      await this.vault.createFolder("AI Copilot");
+    }
+    if (!this.vault.exists(CONVERSATIONS_DIR)) {
+      await this.vault.createFolder(CONVERSATIONS_DIR);
+    }
+  }
+};
+function generateId2() {
+  const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
+  let result = "";
+  for (let i = 0; i < 8; i++) {
+    result += chars[Math.floor(Math.random() * chars.length)];
+  }
+  return result;
+}
+function serializeConversation(conv) {
+  const lines = [];
+  lines.push("---");
+  lines.push(`id: ${conv.meta.id}`);
+  lines.push(`topic: ${conv.meta.topic}`);
+  lines.push(`model: ${conv.meta.model}`);
+  lines.push(`created: ${conv.meta.createdAt}`);
+  lines.push(`updated: ${conv.meta.updatedAt}`);
+  lines.push("---");
+  lines.push("");
+  for (const msg of conv.messages) {
+    const ts2 = new Date(msg.timestamp).toISOString();
+    lines.push(`## ${msg.role} (${ts2})`);
+    lines.push("");
+    lines.push(msg.content);
+    lines.push("");
+  }
+  return lines.join("\n");
+}
+function parseFrontmatter(content) {
+  const match = content.match(/^---\n([\s\S]*?)\n---/);
+  if (!match) return null;
+  const yaml = match[1];
+  const id2 = extractYamlField(yaml, "id");
+  const topic = extractYamlField(yaml, "topic");
+  const model = extractYamlField(yaml, "model");
+  const createdAt = extractYamlField(yaml, "created");
+  const updatedAt = extractYamlField(yaml, "updated");
+  if (!id2 || !topic) return null;
+  return {
+    id: id2,
+    topic,
+    model: model ?? "unknown",
+    createdAt: createdAt ?? "",
+    updatedAt: updatedAt ?? ""
+  };
+}
+function parseConversationFile(content) {
+  const meta3 = parseFrontmatter(content);
+  if (!meta3) return null;
+  const bodyMatch = content.match(/^---\n[\s\S]*?\n---\n([\s\S]*)$/);
+  const body = bodyMatch?.[1] ?? "";
+  const messages = [];
+  const sectionPattern = /## (user|assistant|system) \((\S+)\)\n\n([\s\S]*?)(?=\n## (?:user|assistant|system) \(|$)/g;
+  let m2;
+  while ((m2 = sectionPattern.exec(body)) !== null) {
+    const role = m2[1];
+    const timestamp = new Date(m2[2]).getTime();
+    const msgContent = m2[3].trimEnd();
+    messages.push({ role, content: msgContent, timestamp });
+  }
+  return { meta: meta3, messages };
+}
+function extractYamlField(yaml, field) {
+  const regex = new RegExp(`^${field}:\\s*(.+)$`, "m");
+  const match = yaml.match(regex);
+  return match ? match[1].trim() : null;
+}
+
 // src/chat-orchestrator.ts
 var ChatOrchestrator = class {
   constructor(app, vault, getSettings, getRelevantNotes, writeAssistantOutput) {
@@ -61697,6 +61886,48 @@ var ChatOrchestrator = class {
     this.getSettings = getSettings;
     this.getRelevantNotes = getRelevantNotes;
     this.writeAssistantOutput = writeAssistantOutput;
+    this.activeConversation = null;
+    this.conversationManager = new ConversationManager(vault);
+  }
+  /** Start a new conversation or resume an existing one by ID. */
+  async startConversation(topic, resumeId) {
+    if (resumeId) {
+      const existing = await this.conversationManager.get(resumeId);
+      if (existing) {
+        this.activeConversation = existing;
+        return existing;
+      }
+    }
+    const settings = this.getSettings();
+    const model = `${settings.provider}/${settings.provider === "openai" ? settings.openaiModel : settings.provider === "anthropic" ? settings.anthropicModel : settings.bedrockModel}`;
+    const conv = await this.conversationManager.create(
+      topic ?? `Chat ${(/* @__PURE__ */ new Date()).toISOString().slice(0, 16)}`,
+      model
+    );
+    this.activeConversation = conv;
+    return conv;
+  }
+  /** Get the active conversation, creating one if needed. */
+  async ensureConversation() {
+    if (!this.activeConversation) {
+      return this.startConversation();
+    }
+    return this.activeConversation;
+  }
+  /** Inject vault context as system messages into the conversation. */
+  async injectVaultContext(conv, query) {
+    const settings = this.getSettings();
+    const related = await this.getRelevantNotes(query, settings.chatMaxResults);
+    if (related.length === 0) return;
+    const contextText = related.map((n) => `### ${n.path}
+${n.content.slice(0, 1200)}`).join("\n\n");
+    await this.conversationManager.addMessage(
+      conv.meta.id,
+      "system",
+      `Relevant vault notes for context:
+
+${contextText}`
+    );
   }
   registerView(registerView) {
     registerView(AI_COPILOT_VIEW, (leaf) => new AICopilotChatView(leaf));
@@ -61722,11 +61953,17 @@ var ChatOrchestrator = class {
     workspace.revealLeaf(leaf);
     const view = leaf.view;
     if (view instanceof AICopilotChatView) {
+      const conv = await this.startConversation();
       view.setSubmitHandler(async (query) => {
         const settings = this.getSettings();
+        await this.conversationManager.addMessage(conv.meta.id, "user", query);
+        await this.injectVaultContext(conv, query);
         const agentClient = buildAgentClient(settings);
         if (agentClient) {
           const toolCtx = this.buildToolContext(settings);
+          const messages = this.conversationManager.toAgentMessages(conv);
+          const systemCtx = this.conversationManager.getSystemContext(conv);
+          const systemPrompt = systemCtx.length > 0 ? systemCtx.join("\n\n") + "\n\nAnswer using the vault notes above as context." : void 0;
           const result = await runAgentLoop(
             agentClient,
             query,
@@ -61735,8 +61972,11 @@ var ChatOrchestrator = class {
             {
               onToolCall: (name21) => view.showToolProgress(name21),
               onText: () => view.clearToolProgress()
-            }
+            },
+            messages,
+            systemPrompt
           );
+          await this.conversationManager.addMessage(conv.meta.id, "assistant", result.text);
           await upsertChatOutput(
             this.vault,
             `## Query
@@ -61751,15 +61991,10 @@ ${result.text}`
             citations: result.citations
           };
         }
-        const related = await this.getRelevantNotes(query, settings.chatMaxResults);
-        const context2 = related.map((n) => `### ${n.path}
-${n.content.slice(0, 1200)}`).join("\n\n");
-        const prompt = `Question: ${query}
-
-Use these notes:
-
-${context2}`;
-        const output = await buildClient(settings).chat(prompt, "Answer using only note evidence.");
+        const contextMsgs = this.conversationManager.getContextWindow(conv);
+        const historyPrompt = contextMsgs.map((m2) => `${m2.role}: ${m2.content}`).join("\n\n");
+        const output = await buildClient(settings).chat(historyPrompt, "Answer using only note evidence.");
+        await this.conversationManager.addMessage(conv.meta.id, "assistant", output);
         await upsertChatOutput(this.vault, `## Query
 ${query}
 
@@ -61768,7 +62003,7 @@ ${output}`);
         return {
           role: "assistant",
           text: output,
-          citations: related.map((n) => ({ path: n.path, score: n.score })).slice(0, 5)
+          citations: []
         };
       });
     }
@@ -61791,10 +62026,17 @@ ${n.content.slice(0, 500)}`),
   }
   async chatQuery(query) {
     const settings = this.getSettings();
+    const conv = await this.ensureConversation();
+    await this.conversationManager.addMessage(conv.meta.id, "user", query);
+    await this.injectVaultContext(conv, query);
     const agentClient = buildAgentClient(settings);
     if (agentClient) {
       const toolCtx = this.buildToolContext(settings);
-      const result = await runAgentLoop(agentClient, query, toolCtx, settings);
+      const messages = this.conversationManager.toAgentMessages(conv);
+      const systemCtx = this.conversationManager.getSystemContext(conv);
+      const systemPrompt = systemCtx.length > 0 ? systemCtx.join("\n\n") + "\n\nAnswer using the vault notes above as context." : void 0;
+      const result = await runAgentLoop(agentClient, query, toolCtx, settings, void 0, messages, systemPrompt);
+      await this.conversationManager.addMessage(conv.meta.id, "assistant", result.text);
       await upsertChatOutput(
         this.vault,
         `## Query
@@ -61806,15 +62048,10 @@ ${result.text}`
       new import_obsidian3.Notice("AI Copilot: query response saved.");
       return;
     }
-    const related = await this.getRelevantNotes(query, settings.chatMaxResults);
-    const context2 = related.map((n) => `### ${n.path}
-${n.content.slice(0, 1200)}`).join("\n\n");
-    const prompt = `Question: ${query}
-
-Use these notes:
-
-${context2}`;
-    const output = await buildClient(settings).chat(prompt, "Answer using only note evidence.");
+    const contextMsgs = this.conversationManager.getContextWindow(conv);
+    const historyPrompt = contextMsgs.map((m2) => `${m2.role}: ${m2.content}`).join("\n\n");
+    const output = await buildClient(settings).chat(historyPrompt, "Answer using only note evidence.");
+    await this.conversationManager.addMessage(conv.meta.id, "assistant", output);
     await upsertChatOutput(this.vault, `## Query
 ${query}
 
@@ -62224,7 +62461,7 @@ TODOs found: ${preview.todoCount}`);
 }
 
 // src/cross-note-analysis.ts
-function parseFrontmatter(content) {
+function parseFrontmatter2(content) {
   const fields = /* @__PURE__ */ new Map();
   if (!content.startsWith("---")) return fields;
   const endIdx = content.indexOf("\n---", 3);
@@ -62265,7 +62502,7 @@ async function buildVaultGraph(vault) {
     }
     forwardLinks.set(file2.path, linkTargets);
     tags.set(file2.path, new Set(meta3.tags));
-    frontmatter.set(file2.path, parseFrontmatter(content));
+    frontmatter.set(file2.path, parseFrontmatter2(content));
   }
   return { forwardLinks, backlinks, tags, frontmatter, notePaths, rawPaths };
 }
