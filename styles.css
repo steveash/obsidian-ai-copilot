@@ -31,6 +31,22 @@
   flex-shrink: 0;
 }
 
+.ai-copilot-cancel-btn {
+  margin: 4px 12px;
+  padding: 4px 16px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-error);
+  cursor: pointer;
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+.ai-copilot-cancel-btn:hover {
+  background: var(--background-modifier-error);
+}
+
 /* Mobile: ensure chat fits smaller viewports (375px+) */
 @media (max-width: 480px) {
   .ai-copilot-chat-root h3 {

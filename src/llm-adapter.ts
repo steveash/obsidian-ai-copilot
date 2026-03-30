@@ -3,7 +3,7 @@ import { createOpenAI } from "@ai-sdk/openai";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createAmazonBedrock } from "@ai-sdk/amazon-bedrock";
 import type { AICopilotSettings } from "./settings";
-import type { AgentClient, AgentMessage, ContentBlock, MessagesResponse } from "./agent-loop";
+import type { AgentClient, AgentMessage, ContentBlock, MessagesResponse, TokenUsage } from "./agent-loop";
 
 export interface LLMClient {
   chat(prompt: string, system?: string): Promise<string>;
@@ -69,7 +69,8 @@ export class AISDKAgentClient implements AgentClient {
     messages: AgentMessage[],
     system: string,
     _tools: unknown[],
-    maxTokens: number
+    maxTokens: number,
+    abortSignal?: AbortSignal
   ): Promise<MessagesResponse> {
     validateRemoteAccess(this.settings);
     const model = resolveModel(this.settings);
@@ -137,6 +138,7 @@ export class AISDKAgentClient implements AgentClient {
       system,
       messages: sdkMessages as unknown as Array<{ role: string; content: unknown }>,
       maxOutputTokens: maxTokens,
+      abortSignal,
     } as Parameters<typeof generateText>[0]);
 
     // Convert AI SDK response back to our ContentBlock format
@@ -165,7 +167,13 @@ export class AISDKAgentClient implements AgentClient {
       stopReason = "end_turn";
     }
 
-    return { content, stop_reason: stopReason };
+    // Extract token usage from AI SDK response
+    const usage: TokenUsage | undefined =
+      result.usage?.inputTokens != null && result.usage?.outputTokens != null
+        ? { inputTokens: result.usage.inputTokens, outputTokens: result.usage.outputTokens }
+        : undefined;
+
+    return { content, stop_reason: stopReason, usage };
   }
 }
 

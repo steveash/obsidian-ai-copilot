@@ -1,4 +1,5 @@
 import type { ChatCitation } from "./chat";
+import type { TokenUsage } from "./agent-loop";
 
 const TOOL_LABELS: Record<string, string> = {
   search_notes: "Searching vault...",
@@ -20,6 +21,19 @@ export function escapeHtml(text: string): string {
 /** Format tool progress label from tool name. */
 export function formatToolProgressText(toolName: string): string {
   return TOOL_LABELS[toolName] ?? `Running ${toolName}...`;
+}
+
+/**
+ * Build token usage HTML block for display after a response.
+ * Returns empty string when usage is not available.
+ */
+export function formatTokenUsageHtml(usage: TokenUsage): string {
+  const total = usage.inputTokens + usage.outputTokens;
+  return (
+    '<div class="ai-copilot-token-usage">' +
+    `Tokens: ${usage.inputTokens} in / ${usage.outputTokens} out (${total} total)` +
+    "</div>"
+  );
 }
 
 /**

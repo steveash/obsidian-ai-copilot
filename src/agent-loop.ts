@@ -19,9 +19,15 @@ export interface AgentMessage {
   content: string | ContentBlock[];
 }
 
+export interface TokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+}
+
 export interface MessagesResponse {
   content: ContentBlock[];
   stop_reason: "end_turn" | "tool_use" | "max_tokens" | "stop_sequence";
+  usage?: TokenUsage;
 }
 
 export interface AgentClient {
@@ -29,7 +35,8 @@ export interface AgentClient {
     messages: AgentMessage[],
     system: string,
     tools: ToolDefinition[],
-    maxTokens: number
+    maxTokens: number,
+    abortSignal?: AbortSignal
   ): Promise<MessagesResponse>;
 }
 
@@ -43,6 +50,7 @@ export interface AgentLoopResult {
   text: string;
   citations: ChatCitation[];
   toolCallCount: number;
+  usage?: TokenUsage;
 }
 
 const AGENT_SYSTEM_PROMPT =
@@ -58,6 +66,14 @@ const AGENT_SYSTEM_PROMPT =
   "If you cannot find relevant information in the vault, say so honestly.\n\n" +
   "Be concise and helpful. Focus on answering the user's question using vault content.";
 
+function accumulateUsage(total: TokenUsage, step?: TokenUsage): TokenUsage {
+  if (!step) return total;
+  return {
+    inputTokens: total.inputTokens + step.inputTokens,
+    outputTokens: total.outputTokens + step.outputTokens,
+  };
+}
+
 export async function runAgentLoop(
   client: AgentClient,
   query: string,
@@ -65,7 +81,8 @@ export async function runAgentLoop(
   settings: AICopilotSettings,
   callbacks?: AgentLoopCallbacks,
   priorMessages?: AgentMessage[],
-  systemPrompt?: string
+  systemPrompt?: string,
+  abortSignal?: AbortSignal
 ): Promise<AgentLoopResult> {
   const maxToolCalls = settings.agentMaxToolCalls;
   const messages: AgentMessage[] = priorMessages
@@ -74,14 +91,20 @@ export async function runAgentLoop(
   const system = systemPrompt ?? AGENT_SYSTEM_PROMPT;
   const citedPaths = new Map<string, number>();
   let toolCallCount = 0;
+  let totalUsage: TokenUsage = { inputTokens: 0, outputTokens: 0 };
 
   for (let i = 0; i < maxToolCalls + 1; i++) {
+    abortSignal?.throwIfAborted();
+
     const response = await client.chatMessages(
       messages,
       system,
       AGENT_TOOLS,
-      4096
+      4096,
+      abortSignal
     );
+
+    totalUsage = accumulateUsage(totalUsage, response.usage);
 
     if (response.stop_reason === "end_turn" || response.stop_reason === "max_tokens") {
       const text = extractText(response.content);
@@ -89,14 +112,15 @@ export async function runAgentLoop(
       return {
         text,
         citations: buildCitations(citedPaths),
-        toolCallCount
+        toolCallCount,
+        usage: totalUsage
       };
     }
 
     if (response.stop_reason !== "tool_use") {
       const text = extractText(response.content);
       callbacks?.onText?.(text);
-      return { text, citations: buildCitations(citedPaths), toolCallCount };
+      return { text, citations: buildCitations(citedPaths), toolCallCount, usage: totalUsage };
     }
 
     messages.push({ role: "assistant", content: response.content });
@@ -128,16 +152,20 @@ export async function runAgentLoop(
     messages.push({ role: "user", content: resultBlocks });
   }
 
+  abortSignal?.throwIfAborted();
+
   const finalResponse = await client.chatMessages(
     messages,
     AGENT_SYSTEM_PROMPT,
     AGENT_TOOLS,
-    4096
+    4096,
+    abortSignal
   );
 
+  totalUsage = accumulateUsage(totalUsage, finalResponse.usage);
   const text = extractText(finalResponse.content);
   callbacks?.onText?.(text);
-  return { text, citations: buildCitations(citedPaths), toolCallCount };
+  return { text, citations: buildCitations(citedPaths), toolCallCount, usage: totalUsage };
 }
 
 function extractText(content: ContentBlock[]): string {

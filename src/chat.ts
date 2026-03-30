@@ -2,9 +2,10 @@ import type { WorkspaceLeaf } from "obsidian";
 import { ItemView, Notice, TFile } from "obsidian";
 import type { VaultAdapter } from "./vault-adapter";
 import type { DeepChat } from "deep-chat";
-import { escapeHtml, formatCitationHtml, formatToolProgressText } from "./chat-format";
+import type { TokenUsage } from "./agent-loop";
+import { escapeHtml, formatCitationHtml, formatToolProgressText, formatTokenUsageHtml } from "./chat-format";
 
-export { escapeHtml, formatCitationHtml, formatToolProgressText };
+export { escapeHtml, formatCitationHtml, formatToolProgressText, formatTokenUsageHtml };
 
 export const AI_COPILOT_VIEW = "ai-copilot-chat-view";
 
@@ -17,12 +18,15 @@ export interface ChatMessage {
   role: "user" | "assistant";
   text: string;
   citations?: ChatCitation[];
+  usage?: TokenUsage;
 }
 
 export class AICopilotChatView extends ItemView {
   private deepChatEl: DeepChat | null = null;
-  private onSubmit: ((query: string) => Promise<ChatMessage>) | null = null;
+  private onSubmit: ((query: string, abortSignal: AbortSignal) => Promise<ChatMessage>) | null = null;
   private toolProgressEl: HTMLElement | null = null;
+  private abortController: AbortController | null = null;
+  private cancelBtn: HTMLElement | null = null;
 
   constructor(leaf: WorkspaceLeaf) {
     super(leaf);
@@ -36,7 +40,7 @@ export class AICopilotChatView extends ItemView {
     return "AI Copilot Chat";
   }
 
-  setSubmitHandler(handler: (query: string) => Promise<ChatMessage>) {
+  setSubmitHandler(handler: (query: string, abortSignal: AbortSignal) => Promise<ChatMessage>) {
     this.onSubmit = handler;
     this.applyHandler();
   }
@@ -66,6 +70,12 @@ export class AICopilotChatView extends ItemView {
 
     this.toolProgressEl = root.createDiv({ cls: "ai-copilot-tool-progress" });
     this.toolProgressEl.style.display = "none";
+
+    this.cancelBtn = root.createEl("button", { text: "Cancel", cls: "ai-copilot-cancel-btn" });
+    this.cancelBtn.style.display = "none";
+    this.cancelBtn.addEventListener("click", () => {
+      this.abortController?.abort();
+    });
 
     const container = root.createDiv({ cls: "ai-copilot-deep-chat-container" });
     const el = document.createElement("deep-chat") as DeepChat;
@@ -200,6 +210,16 @@ export class AICopilotChatView extends ItemView {
 
     // Citation click handling via htmlClassUtilities
     el.htmlClassUtilities = {
+      "ai-copilot-token-usage": {
+        styles: {
+          default: {
+            fontSize: "11px",
+            opacity: "0.6",
+            textAlign: "right" as const,
+            padding: "2px 0"
+          }
+        }
+      },
       "deep-chat-citations": {
         styles: {
           default: {
@@ -269,20 +289,34 @@ export class AICopilotChatView extends ItemView {
           return;
         }
 
-        try {
-          const reply = await handler(query);
+        this.abortController = new AbortController();
+        if (this.cancelBtn) this.cancelBtn.style.display = "block";
 
+        try {
+          const reply = await handler(query, this.abortController.signal);
+
+          if (this.cancelBtn) this.cancelBtn.style.display = "none";
+
+          await signals.onResponse({ text: reply.text });
+
+          if (reply.usage) {
+            el.addMessage({ html: formatTokenUsageHtml(reply.usage), role: "ai" });
+          }
           if (reply.citations?.length) {
-            // Return text response, then add citation HTML as a follow-up
-            await signals.onResponse({ text: reply.text });
             el.addMessage({ html: formatCitationHtml(reply.citations), role: "ai" });
-          } else {
-            await signals.onResponse({ text: reply.text });
           }
         } catch (err) {
+          if (this.cancelBtn) this.cancelBtn.style.display = "none";
+
+          if (err instanceof DOMException && err.name === "AbortError") {
+            await signals.onResponse({ text: "Request cancelled." });
+            return;
+          }
           const message =
             err instanceof Error ? err.message : "An error occurred";
           await signals.onResponse({ error: message });
+        } finally {
+          this.abortController = null;
         }
       }
     };

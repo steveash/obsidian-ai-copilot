@@ -76,6 +76,16 @@ export function registerPluginCommands(
   });
 
   ctx.addCommand({
+    id: "ai-copilot-export-conversation",
+    name: "AI Copilot: Export current conversation",
+    callback: async () => {
+      const path = await chat.exportConversation();
+      if (!path) return void new Notice("AI Copilot: no active conversation to export.");
+      new Notice(`AI Copilot: conversation exported to ${path}`);
+    }
+  });
+
+  ctx.addCommand({
     id: "ai-copilot-rebuild-vector-index",
     name: "AI Copilot: Rebuild persistent vector index",
     callback: async () => {

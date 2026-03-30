@@ -6,7 +6,7 @@ import type { RetrievedNote } from "./semantic-retrieval";
 import type { VaultAdapter } from "./vault-adapter";
 import { runAgentLoop } from "./agent-loop";
 import type { AgentToolContext } from "./agent-tools";
-import { ConversationManager, type Conversation } from "./conversation-manager";
+import { ConversationManager, type Conversation, type ConversationMessage } from "./conversation-manager";
 
 export class ChatOrchestrator {
   private conversationManager: ConversationManager;
@@ -96,7 +96,7 @@ export class ChatOrchestrator {
       // Start a fresh conversation for this chat panel session
       const conv = await this.startConversation();
 
-      view.setSubmitHandler(async (query: string): Promise<ChatMessage> => {
+      view.setSubmitHandler(async (query: string, abortSignal: AbortSignal): Promise<ChatMessage> => {
         const settings = this.getSettings();
 
         // Record user message
@@ -125,7 +125,8 @@ export class ChatOrchestrator {
               onText: () => view.clearToolProgress()
             },
             messages,
-            systemPrompt
+            systemPrompt,
+            abortSignal
           );
 
           // Record assistant response
@@ -139,7 +140,8 @@ export class ChatOrchestrator {
           return {
             role: "assistant",
             text: result.text,
-            citations: result.citations
+            citations: result.citations,
+            usage: result.usage
           };
         }
 
@@ -161,6 +163,46 @@ export class ChatOrchestrator {
         };
       });
     }
+  }
+
+  /** Export the active conversation as a standalone markdown note. */
+  async exportConversation(): Promise<string | null> {
+    const conv = this.activeConversation;
+    if (!conv || conv.messages.length === 0) return null;
+
+    const lines: string[] = [];
+    lines.push(`# ${conv.meta.topic}`);
+    lines.push("");
+    lines.push(`Model: ${conv.meta.model}  `);
+    lines.push(`Exported: ${new Date().toISOString()}`);
+    lines.push("");
+
+    for (const msg of conv.messages) {
+      if (msg.role === "system") continue;
+      const label = msg.role === "user" ? "You" : "Assistant";
+      const ts = new Date(msg.timestamp).toLocaleString();
+      lines.push(`## ${label} (${ts})`);
+      lines.push("");
+      lines.push(msg.content);
+      lines.push("");
+    }
+
+    const filename = `AI Copilot/Exports/${conv.meta.topic.replace(/[/\\:*?"<>|]/g, "-").slice(0, 80)}.md`;
+    if (!this.vault.exists("AI Copilot/Exports")) {
+      if (!this.vault.exists("AI Copilot")) {
+        await this.vault.createFolder("AI Copilot");
+      }
+      await this.vault.createFolder("AI Copilot/Exports");
+    }
+
+    const content = lines.join("\n");
+    if (this.vault.exists(filename)) {
+      await this.vault.modify(filename, content);
+    } else {
+      await this.vault.create(filename, content);
+    }
+
+    return filename;
   }
 
   async chatActiveNote(file: TFile) {
