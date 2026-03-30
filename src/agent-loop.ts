@@ -63,17 +63,22 @@ export async function runAgentLoop(
   query: string,
   toolCtx: AgentToolContext,
   settings: AICopilotSettings,
-  callbacks?: AgentLoopCallbacks
+  callbacks?: AgentLoopCallbacks,
+  priorMessages?: AgentMessage[],
+  systemPrompt?: string
 ): Promise<AgentLoopResult> {
   const maxToolCalls = settings.agentMaxToolCalls;
-  const messages: AgentMessage[] = [{ role: "user", content: query }];
+  const messages: AgentMessage[] = priorMessages
+    ? [...priorMessages]
+    : [{ role: "user", content: query }];
+  const system = systemPrompt ?? AGENT_SYSTEM_PROMPT;
   const citedPaths = new Map<string, number>();
   let toolCallCount = 0;
 
   for (let i = 0; i < maxToolCalls + 1; i++) {
     const response = await client.chatMessages(
       messages,
-      AGENT_SYSTEM_PROMPT,
+      system,
       AGENT_TOOLS,
       4096
     );
