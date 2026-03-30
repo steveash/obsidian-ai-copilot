@@ -6,15 +6,65 @@ import type { RetrievedNote } from "./semantic-retrieval";
 import type { VaultAdapter } from "./vault-adapter";
 import { runAgentLoop } from "./agent-loop";
 import type { AgentToolContext } from "./agent-tools";
+import { ConversationManager, type Conversation } from "./conversation-manager";
 
 export class ChatOrchestrator {
+  private conversationManager: ConversationManager;
+  private activeConversation: Conversation | null = null;
+
   constructor(
     private readonly app: App,
     private readonly vault: VaultAdapter,
     private readonly getSettings: () => AICopilotSettings,
     private readonly getRelevantNotes: (query: string, maxResults: number) => Promise<RetrievedNote[]>,
     private readonly writeAssistantOutput: (name: string, body: string) => Promise<void>
-  ) {}
+  ) {
+    this.conversationManager = new ConversationManager(vault);
+  }
+
+  /** Start a new conversation or resume an existing one by ID. */
+  async startConversation(topic?: string, resumeId?: string): Promise<Conversation> {
+    if (resumeId) {
+      const existing = await this.conversationManager.get(resumeId);
+      if (existing) {
+        this.activeConversation = existing;
+        return existing;
+      }
+    }
+    const settings = this.getSettings();
+    const model = `${settings.provider}/${settings.provider === "openai" ? settings.openaiModel : settings.provider === "anthropic" ? settings.anthropicModel : settings.bedrockModel}`;
+    const conv = await this.conversationManager.create(
+      topic ?? `Chat ${new Date().toISOString().slice(0, 16)}`,
+      model
+    );
+    this.activeConversation = conv;
+    return conv;
+  }
+
+  /** Get the active conversation, creating one if needed. */
+  private async ensureConversation(): Promise<Conversation> {
+    if (!this.activeConversation) {
+      return this.startConversation();
+    }
+    return this.activeConversation;
+  }
+
+  /** Inject vault context as system messages into the conversation. */
+  private async injectVaultContext(conv: Conversation, query: string): Promise<void> {
+    const settings = this.getSettings();
+    const related = await this.getRelevantNotes(query, settings.chatMaxResults);
+    if (related.length === 0) return;
+
+    const contextText = related
+      .map((n) => `### ${n.path}\n${n.content.slice(0, 1200)}`)
+      .join("\n\n");
+
+    await this.conversationManager.addMessage(
+      conv.meta.id,
+      "system",
+      `Relevant vault notes for context:\n\n${contextText}`
+    );
+  }
 
   registerView(registerView: (type: string, cb: (leaf: WorkspaceLeaf) => AICopilotChatView) => void) {
     registerView(AI_COPILOT_VIEW, (leaf) => new AICopilotChatView(leaf));
@@ -43,12 +93,28 @@ export class ChatOrchestrator {
     workspace.revealLeaf(leaf);
     const view = leaf.view;
     if (view instanceof AICopilotChatView) {
+      // Start a fresh conversation for this chat panel session
+      const conv = await this.startConversation();
+
       view.setSubmitHandler(async (query: string): Promise<ChatMessage> => {
         const settings = this.getSettings();
+
+        // Record user message
+        await this.conversationManager.addMessage(conv.meta.id, "user", query);
+
+        // Inject relevant vault context as system messages
+        await this.injectVaultContext(conv, query);
+
         const agentClient = buildAgentClient(settings);
 
         if (agentClient) {
           const toolCtx = this.buildToolContext(settings);
+          const messages = this.conversationManager.toAgentMessages(conv);
+          const systemCtx = this.conversationManager.getSystemContext(conv);
+          const systemPrompt = systemCtx.length > 0
+            ? systemCtx.join("\n\n") + "\n\nAnswer using the vault notes above as context."
+            : undefined;
+
           const result = await runAgentLoop(
             agentClient,
             query,
@@ -57,8 +123,13 @@ export class ChatOrchestrator {
             {
               onToolCall: (name) => view.showToolProgress(name),
               onText: () => view.clearToolProgress()
-            }
+            },
+            messages,
+            systemPrompt
           );
+
+          // Record assistant response
+          await this.conversationManager.addMessage(conv.meta.id, "assistant", result.text);
 
           await upsertChatOutput(
             this.vault,
@@ -73,15 +144,20 @@ export class ChatOrchestrator {
         }
 
         // Fallback: non-agent providers (OpenAI, dry-run)
-        const related = await this.getRelevantNotes(query, settings.chatMaxResults);
-        const context = related.map((n) => `### ${n.path}\n${n.content.slice(0, 1200)}`).join("\n\n");
-        const prompt = `Question: ${query}\n\nUse these notes:\n\n${context}`;
-        const output = await buildClient(settings).chat(prompt, "Answer using only note evidence.");
+        const contextMsgs = this.conversationManager.getContextWindow(conv);
+        const historyPrompt = contextMsgs
+          .map((m) => `${m.role}: ${m.content}`)
+          .join("\n\n");
+        const output = await buildClient(settings).chat(historyPrompt, "Answer using only note evidence.");
+
+        // Record assistant response
+        await this.conversationManager.addMessage(conv.meta.id, "assistant", output);
+
         await upsertChatOutput(this.vault, `## Query\n${query}\n\n## Response\n${output}`);
         return {
           role: "assistant",
           text: output,
-          citations: related.map((n) => ({ path: n.path, score: n.score })).slice(0, 5)
+          citations: []
         };
       });
     }
@@ -106,11 +182,25 @@ export class ChatOrchestrator {
 
   async chatQuery(query: string) {
     const settings = this.getSettings();
+    const conv = await this.ensureConversation();
+
+    // Record user message and inject context
+    await this.conversationManager.addMessage(conv.meta.id, "user", query);
+    await this.injectVaultContext(conv, query);
+
     const agentClient = buildAgentClient(settings);
 
     if (agentClient) {
       const toolCtx = this.buildToolContext(settings);
-      const result = await runAgentLoop(agentClient, query, toolCtx, settings);
+      const messages = this.conversationManager.toAgentMessages(conv);
+      const systemCtx = this.conversationManager.getSystemContext(conv);
+      const systemPrompt = systemCtx.length > 0
+        ? systemCtx.join("\n\n") + "\n\nAnswer using the vault notes above as context."
+        : undefined;
+
+      const result = await runAgentLoop(agentClient, query, toolCtx, settings, undefined, messages, systemPrompt);
+
+      await this.conversationManager.addMessage(conv.meta.id, "assistant", result.text);
       await upsertChatOutput(
         this.vault,
         `## Query\n${query}\n\n## Response\n${result.text}`
@@ -120,10 +210,13 @@ export class ChatOrchestrator {
     }
 
     // Fallback: non-agent providers
-    const related = await this.getRelevantNotes(query, settings.chatMaxResults);
-    const context = related.map((n) => `### ${n.path}\n${n.content.slice(0, 1200)}`).join("\n\n");
-    const prompt = `Question: ${query}\n\nUse these notes:\n\n${context}`;
-    const output = await buildClient(settings).chat(prompt, "Answer using only note evidence.");
+    const contextMsgs = this.conversationManager.getContextWindow(conv);
+    const historyPrompt = contextMsgs
+      .map((m) => `${m.role}: ${m.content}`)
+      .join("\n\n");
+    const output = await buildClient(settings).chat(historyPrompt, "Answer using only note evidence.");
+
+    await this.conversationManager.addMessage(conv.meta.id, "assistant", output);
     await upsertChatOutput(this.vault, `## Query\n${query}\n\n## Response\n${output}`);
     new Notice("AI Copilot: query response saved.");
   }
