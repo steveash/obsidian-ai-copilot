@@ -1,5 +1,5 @@
 import { Notice, type App, type TFile, type WorkspaceLeaf } from "obsidian";
-import { buildClient, buildAgentClient } from "./llm";
+import { buildClient, buildAgentClient } from "./llm-adapter";
 import { AICopilotChatView, AI_COPILOT_VIEW, upsertChatOutput, type ChatMessage } from "./chat";
 import type { AICopilotSettings } from "./settings";
 import type { RetrievedNote } from "./semantic-retrieval";

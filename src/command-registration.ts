@@ -2,7 +2,7 @@ import { type App, type Command, Notice, TFile } from "obsidian";
 import { toMarkdownPlan, buildRefinementPlan } from "./planner";
 import { buildRefinementPrompt } from "./refinement";
 import type { PatchTransaction } from "./patcher";
-import { buildClient } from "./llm";
+import { buildClient } from "./llm-adapter";
 import type { ChatOrchestrator } from "./chat-orchestrator";
 import type { IndexingOrchestrator } from "./indexing-orchestrator";
 import type { AICopilotSettings } from "./settings";

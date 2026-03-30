@@ -6,7 +6,7 @@ import { loadEnrichmentState } from "../src/enrichment-state";
 import type { IndexingOrchestrator } from "../src/indexing-orchestrator";
 
 // Mock LLM and refinement modules to avoid real API calls
-vi.mock("../src/llm", () => ({
+vi.mock("../src/llm-adapter", () => ({
   buildClient: () => ({
     chat: vi.fn().mockResolvedValue("No changes needed."),
   }),

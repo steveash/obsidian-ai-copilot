@@ -12,7 +12,7 @@ import type { AICopilotSettings } from "./settings";
 import type { IndexingOrchestrator } from "./indexing-orchestrator";
 import { buildRefinementPlan, toMarkdownPlan } from "./planner";
 import { buildRefinementPrompt } from "./refinement";
-import { buildClient } from "./llm";
+import { buildClient } from "./llm-adapter";
 import { buildPatchPlanSystemPrompt } from "./patch-plan-parser";
 import {
   buildRefinementPreview,
