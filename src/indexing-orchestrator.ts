@@ -1,4 +1,4 @@
-import { OpenAIEmbeddingProvider, BedrockEmbeddingProvider, FallbackHashEmbeddingProvider } from "./embedding-provider";
+import { AISDKEmbeddingProvider, FallbackHashEmbeddingProvider } from "./embedding-provider";
 import { BackgroundIndexingQueue } from "./indexing-queue";
 import { removeIndexedNote, syncIndexedNote } from "./indexing-sync";
 import type { AICopilotSettings } from "./settings";
@@ -19,14 +19,10 @@ export class IndexingOrchestrator {
   }
 
   private buildEmbeddingProvider(settings: AICopilotSettings) {
-    switch (settings.embeddingProvider) {
-      case "openai":
-        return new OpenAIEmbeddingProvider(settings);
-      case "bedrock":
-        return new BedrockEmbeddingProvider(settings);
-      default:
-        return new FallbackHashEmbeddingProvider();
+    if (settings.embeddingProvider === "openai" || settings.embeddingProvider === "bedrock") {
+      return new AISDKEmbeddingProvider(settings);
     }
+    return new FallbackHashEmbeddingProvider();
   }
 
   getVectorIndex(): PersistentVectorIndex {
